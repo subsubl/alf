@@ -1,0 +1,20 @@
+# Raspberry Pi Zero 2 W Orchestrator Configuration
+serial:
+  port: /dev/ttyACM0
+  baudrate: 115200
+
+quixi:
+  rest_url: http://127.0.0.1:8001
+  mqtt_host: 127.0.0.1
+  mqtt_port: 1883
+  server_ixian_address: 1ReplaceWithYourServerQuIXIWalletAddress
+
+audio:
+  sample_rate: 16000
+  frame_ms: 100
+  vad_aggressiveness: 2       # 0 (least) .. 3 (most aggressive)
+  vad_silence_ms: 900         # Stop speech capture after 900ms silence
+  bt_latency_ms: 150          # Sync offset so mouth & subtitles match Bluetooth speaker delay
+  default_mic_mode: vad       # "vad" or "ptt"
+  input_device: null          # Optional sounddevice index or name (null = system default PipeWire/Pulse)
+  output_device: null

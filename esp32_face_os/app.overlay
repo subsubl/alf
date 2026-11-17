@@ -1,0 +1,42 @@
+#include <zephyr/dt-bindings/adc/adc.h>
+
+/ {
+	aliases {
+		backlight = &backlight_pin;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		backlight_pin: backlight_pin {
+			gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+			label = "LCD Backlight";
+		};
+	};
+
+	zephyr,user {
+		io-channels = <&adc0 0>;
+	};
+};
+
+&ledc0 {
+	status = "disabled";
+};
+
+&gc9a01 {
+	mipi-max-frequency = <20000000>;
+	pixel-format = <PANEL_PIXEL_FORMAT_RGB_565>;
+};
+
+&adc0 {
+	status = "okay";
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	channel@0 {
+		reg = <0>;
+		zephyr,gain = "ADC_GAIN_1_4";
+		zephyr,reference = "ADC_REF_INTERNAL";
+		zephyr,acquisition-time = <ADC_ACQ_TIME_DEFAULT>;
+		zephyr,resolution = <12>;
+	};
+};
