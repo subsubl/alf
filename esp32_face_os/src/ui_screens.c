@@ -843,7 +843,7 @@ static void update_smooth_rotation(void)
         if (imu.ready) {
             float in_plane = sqrtf(imu.ax * imu.ax + imu.ay * imu.ay);
             if (in_plane > 2.0f) {
-                float raw_rad = atan2f(imu.ay, -imu.ax);
+                float raw_rad = atan2f(-imu.ay, -imu.ax);
                 if (rot_mode == 1) {
                     /* Snap to 0 or 180 deg */
                     target_rad = (fabsf(raw_rad) > (float)(M_PI * 0.5)) ? (float)M_PI : 0.0f;
