@@ -4,16 +4,15 @@
 #include "imu_qmi8658.h"
 
 #include <lvgl.h>
+#include <lvgl_display.h>
 #include <math.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <zephyr/device.h>
+#include <zephyr/devicetree.h>
+#include <zephyr/drivers/display.h>
 #include <zephyr/kernel.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 static ui_callbacks_t g_cbs;
 
@@ -22,20 +21,6 @@ static lv_obj_t *scr_face;
 static lv_obj_t *scr_settings;
 static lv_obj_t *scr_debug;
 static int current_screen_idx;
-
-/* Orbital widget registry for smooth 360-deg rotation around (120, 120) */
-typedef struct {
-    lv_obj_t *obj;
-    int screen_idx;
-    float base_x; /* Offset from (120, 120) at 0 deg */
-    float base_y;
-    lv_coord_t w;
-    lv_coord_t h;
-} orbital_widget_t;
-
-#define MAX_ORBITAL_WIDGETS 28
-static orbital_widget_t orbit_widgets[MAX_ORBITAL_WIDGETS];
-static int orbit_count;
 
 /* Face screen widgets */
 static lv_obj_t *face_canvas;
@@ -55,11 +40,11 @@ static int cfg_vol = 75;
 static bool cfg_mic_vad = true;
 static bool cfg_ble_en = true;
 
-/* Rotation modes: 0 = Auto 360, 1 = Auto 180 flip, 2 = Locked 0 */
+/* 4-Step Hardware Rotation: 0 = Auto 4-Way, 1 = Auto Flip 0/180, 2 = Lock Upright (180) */
 static int rot_mode = 0;
-static float g_rot_rad = 0.0f;
-static int16_t g_rot_tenths_deg = 0;
-static int16_t last_widget_angle_tenths = -9999;
+static enum display_orientation current_orient = DISPLAY_ORIENTATION_ROTATED_180;
+static enum display_orientation pending_orient = DISPLAY_ORIENTATION_ROTATED_180;
+static int orient_stable_ticks = 0;
 
 /* Debug screen widgets */
 static lv_obj_t *dbg_link_lbl;
@@ -87,63 +72,90 @@ static char link_bt[16]    = "WAIT";
 static int link_rtt_ms     = -1;
 
 /* ============================================================================
- * 360-Degree Geometry & Orbital Widget Transform Helpers
+ * Hardware 4-Step Display & Touch Orientation
  * ============================================================================ */
 
-static void register_orbital(lv_obj_t *obj, int scr_idx, float off_x, float off_y,
-                             lv_coord_t w, lv_coord_t h)
+static int orient_to_deg(enum display_orientation o)
 {
-    if (orbit_count >= MAX_ORBITAL_WIDGETS) {
+    switch (o) {
+    case DISPLAY_ORIENTATION_ROTATED_90:  return 90;
+    case DISPLAY_ORIENTATION_ROTATED_180: return 180;
+    case DISPLAY_ORIENTATION_ROTATED_270: return 270;
+    default:                              return 0;
+    }
+}
+
+static void apply_hardware_orientation(enum display_orientation new_orient)
+{
+    const struct device *disp_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_display));
+    if (!device_is_ready(disp_dev)) {
         return;
     }
-    lv_obj_set_size(obj, w, h);
-    lv_obj_set_style_transform_pivot_x(obj, w / 2, 0);
-    lv_obj_set_style_transform_pivot_y(obj, h / 2, 0);
-    lv_obj_set_pos(obj, (lv_coord_t)lroundf(120.0f + off_x - w * 0.5f),
-                   (lv_coord_t)lroundf(120.0f + off_y - h * 0.5f));
 
-    orbit_widgets[orbit_count++] = (orbital_widget_t){
-        .obj = obj,
-        .screen_idx = scr_idx,
-        .base_x = off_x,
-        .base_y = off_y,
-        .w = w,
-        .h = h,
-    };
-}
-
-static void apply_orbital_rotation(int scr_idx, float rad, int16_t angle_tenths)
-{
-    float c = cosf(rad);
-    float s = sinf(rad);
-
-    for (int i = 0; i < orbit_count; i++) {
-        if (orbit_widgets[i].screen_idx != scr_idx) {
-            continue;
+    if (display_set_orientation(disp_dev, new_orient) == 0) {
+        current_orient = new_orient;
+        lv_disp_t *disp = lv_disp_get_default();
+        if (disp && disp->driver && disp->driver->user_data) {
+            struct lvgl_disp_data *disp_data = (struct lvgl_disp_data *)disp->driver->user_data;
+            display_get_capabilities(disp_dev, &disp_data->cap);
         }
-        orbital_widget_t *ow = &orbit_widgets[i];
-        float cx = 120.0f + ow->base_x * c - ow->base_y * s;
-        float cy = 120.0f + ow->base_x * s + ow->base_y * c;
-        lv_obj_set_pos(ow->obj,
-                       (lv_coord_t)lroundf(cx - ow->w * 0.5f),
-                       (lv_coord_t)lroundf(cy - ow->h * 0.5f));
-        lv_obj_set_style_transform_angle(ow->obj, angle_tenths, 0);
+        lv_obj_t *act = lv_scr_act();
+        if (act) {
+            lv_obj_invalidate(act);
+        }
     }
 }
 
-static void rot_pt(float lx, float ly, lv_point_t *out)
+static void update_4step_rotation(void)
 {
-    float c = cosf(g_rot_rad);
-    float s = sinf(g_rot_rad);
-    out->x = (lv_coord_t)lroundf(120.0f + lx * c - ly * s);
-    out->y = (lv_coord_t)lroundf(120.0f + lx * s + ly * c);
-}
+    enum display_orientation desired = current_orient;
 
-static uint16_t wrap_deg_360(int deg)
-{
-    int m = deg % 360;
-    if (m < 0) m += 360;
-    return (uint16_t)m;
+    if (rot_mode == 2) {
+        desired = DISPLAY_ORIENTATION_ROTATED_180;
+    } else {
+        imu_data_t imu;
+        imu_qmi8658_get_latest(&imu);
+        if (imu.ready) {
+            float in_plane = sqrtf(imu.ax * imu.ax + imu.ay * imu.ay);
+            if (in_plane > 3.0f) {
+                float abs_x = fabsf(imu.ax);
+                float abs_y = fabsf(imu.ay);
+
+                if (rot_mode == 1) {
+                    /* Flip 0 / 180 only */
+                    if (abs_x > 2.5f) {
+                        desired = (imu.ax > 0.0f) ? DISPLAY_ORIENTATION_ROTATED_180
+                                                  : DISPLAY_ORIENTATION_NORMAL;
+                    }
+                } else {
+                    /* Full 4-step with 1.35x dominance hysteresis */
+                    if (abs_x > abs_y * 1.35f) {
+                        desired = (imu.ax > 0.0f) ? DISPLAY_ORIENTATION_ROTATED_180
+                                                  : DISPLAY_ORIENTATION_NORMAL;
+                    } else if (abs_y > abs_x * 1.35f) {
+                        desired = (imu.ay < 0.0f) ? DISPLAY_ORIENTATION_ROTATED_90
+                                                  : DISPLAY_ORIENTATION_ROTATED_270;
+                    }
+                }
+            }
+        }
+    }
+
+    if (desired != current_orient) {
+        if (desired == pending_orient) {
+            orient_stable_ticks++;
+            if (orient_stable_ticks >= 4) { /* ~120ms debounce */
+                orient_stable_ticks = 0;
+                apply_hardware_orientation(desired);
+            }
+        } else {
+            pending_orient = desired;
+            orient_stable_ticks = 1;
+        }
+    } else {
+        pending_orient = current_orient;
+        orient_stable_ticks = 0;
+    }
 }
 
 /* ============================================================================
@@ -156,14 +168,12 @@ static void switch_to_screen(int idx)
     if (idx > 2) idx = 0;
     current_screen_idx = idx;
 
-    apply_orbital_rotation(current_screen_idx, g_rot_rad, g_rot_tenths_deg);
-
     if (idx == 0) {
-        lv_scr_load_anim(scr_face, LV_SCR_LOAD_ANIM_FADE_ON, 150, 0, false);
+        lv_scr_load_anim(scr_face, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
     } else if (idx == 1) {
-        lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_FADE_ON, 150, 0, false);
+        lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
     } else {
-        lv_scr_load_anim(scr_debug, LV_SCR_LOAD_ANIM_FADE_ON, 150, 0, false);
+        lv_scr_load_anim(scr_debug, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
     }
 }
 
@@ -183,17 +193,18 @@ static void screen_gesture_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     lv_dir_t dir = lv_indev_get_gesture_dir(lv_indev_get_act());
-    /* Map physical left/right swipe in screen coordinates */
-    if (dir == LV_DIR_LEFT || dir == LV_DIR_TOP) {
+    if (dir == LV_DIR_LEFT) {
         switch_to_screen(current_screen_idx + 1);
-    } else if (dir == LV_DIR_RIGHT || dir == LV_DIR_BOTTOM) {
+    } else if (dir == LV_DIR_RIGHT) {
         switch_to_screen(current_screen_idx - 1);
     }
 }
 
-static void add_nav_header(lv_obj_t *parent, int scr_idx, const char *title)
+static void add_nav_header(lv_obj_t *parent, const char *title)
 {
     lv_obj_t *btn_prev = lv_btn_create(parent);
+    lv_obj_set_size(btn_prev, 28, 24);
+    lv_obj_align(btn_prev, LV_ALIGN_TOP_MID, -54, 16);
     lv_obj_set_style_radius(btn_prev, 12, 0);
     lv_obj_set_style_bg_color(btn_prev, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(btn_prev, 0, 0);
@@ -201,9 +212,10 @@ static void add_nav_header(lv_obj_t *parent, int scr_idx, const char *title)
     lv_obj_t *lbl_p = lv_label_create(btn_prev);
     lv_label_set_text(lbl_p, "<");
     lv_obj_center(lbl_p);
-    register_orbital(btn_prev, scr_idx, -54.0f, -92.0f, 28, 24);
 
     lv_obj_t *btn_next = lv_btn_create(parent);
+    lv_obj_set_size(btn_next, 28, 24);
+    lv_obj_align(btn_next, LV_ALIGN_TOP_MID, 54, 16);
     lv_obj_set_style_radius(btn_next, 12, 0);
     lv_obj_set_style_bg_color(btn_next, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(btn_next, 0, 0);
@@ -211,15 +223,13 @@ static void add_nav_header(lv_obj_t *parent, int scr_idx, const char *title)
     lv_obj_t *lbl_n = lv_label_create(btn_next);
     lv_label_set_text(lbl_n, ">");
     lv_obj_center(lbl_n);
-    register_orbital(btn_next, scr_idx, 54.0f, -92.0f, 28, 24);
 
     if (title != NULL) {
         lv_obj_t *hdr = lv_label_create(parent);
         lv_label_set_text(hdr, title);
         lv_obj_set_style_text_color(hdr, lv_color_hex(0x38BDF8), 0);
         lv_obj_set_style_text_font(hdr, &lv_font_montserrat_14, 0);
-        lv_obj_set_style_text_align(hdr, LV_TEXT_ALIGN_CENTER, 0);
-        register_orbital(hdr, scr_idx, 0.0f, -92.0f, 76, 18);
+        lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 19);
     }
 
     lv_obj_add_event_cb(parent, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -229,7 +239,7 @@ static void add_nav_header(lv_obj_t *parent, int scr_idx, const char *title)
 static void face_tap_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    pet_blush_frames = 60; /* ~2s happy blush reaction on tap */
+    pet_blush_frames = 60;
     if (g_cbs.on_face_tap) {
         g_cbs.on_face_tap(g_emotion == FACE_SPEAKING);
     }
@@ -290,11 +300,11 @@ static void rot_mode_cb(lv_event_t *e)
     LV_UNUSED(e);
     rot_mode = (rot_mode + 1) % 3;
     if (rot_mode == 0) {
-        lv_label_set_text(cfg_rot_lbl, "Rot: Auto 360");
+        lv_label_set_text(cfg_rot_lbl, "Rot: Auto 4-Way");
     } else if (rot_mode == 1) {
         lv_label_set_text(cfg_rot_lbl, "Rot: Flip 180");
     } else {
-        lv_label_set_text(cfg_rot_lbl, "Rot: Lock 0");
+        lv_label_set_text(cfg_rot_lbl, "Rot: Lock Up");
     }
 }
 
@@ -323,8 +333,16 @@ static void dbg_ble_cb(lv_event_t *e)
 }
 
 /* ============================================================================
- * Procedural 360-Degree Vector Companion Face Renderer
+ * Fast Native-Speed Procedural Vector Companion Face
  * ============================================================================ */
+
+static inline lv_point_t pt(float lx, float ly)
+{
+    return (lv_point_t){
+        .x = (lv_coord_t)lroundf(120.0f + lx),
+        .y = (lv_coord_t)lroundf(114.0f + ly),
+    };
+}
 
 static void draw_filled_circle(lv_draw_ctx_t *draw_ctx, const lv_point_t *c, int r,
                                lv_color_t color, lv_opa_t opa)
@@ -346,12 +364,11 @@ static void draw_filled_circle(lv_draw_ctx_t *draw_ctx, const lv_point_t *c, int
     lv_draw_rect(draw_ctx, &dsc, &area);
 }
 
-static void draw_rot_line(lv_draw_ctx_t *draw_ctx, float x1, float y1, float x2, float y2,
-                          lv_coord_t width, lv_color_t color, lv_opa_t opa)
+static void draw_face_line(lv_draw_ctx_t *draw_ctx, float x1, float y1, float x2, float y2,
+                           lv_coord_t width, lv_color_t color, lv_opa_t opa)
 {
-    lv_point_t p1, p2;
-    rot_pt(x1, y1, &p1);
-    rot_pt(x2, y2, &p2);
+    lv_point_t p1 = pt(x1, y1);
+    lv_point_t p2 = pt(x2, y2);
 
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
@@ -364,34 +381,27 @@ static void draw_rot_line(lv_draw_ctx_t *draw_ctx, float x1, float y1, float x2,
 }
 
 static void draw_single_eye(lv_draw_ctx_t *draw_ctx, float ex, float ey,
-                            int rot_deg, lv_color_t iris_col, bool blink_now)
+                            lv_color_t iris_col, bool blink_now)
 {
-    /* Happy / Sleeping crescent eyes */
     if (g_emotion == FACE_HAPPY) {
-        lv_point_t ec;
-        rot_pt(ex, ey + 6.0f, &ec);
+        lv_point_t ec = pt(ex, ey + 6.0f);
         lv_draw_arc_dsc_t arc;
         lv_draw_arc_dsc_init(&arc);
         arc.color = iris_col;
         arc.width = 6;
         arc.rounded = 1;
-        uint16_t a0 = wrap_deg_360(205 + rot_deg);
-        uint16_t a1 = wrap_deg_360(335 + rot_deg);
-        lv_draw_arc(draw_ctx, &arc, &ec, 17, a0, a1);
+        lv_draw_arc(draw_ctx, &arc, &ec, 17, 205, 335);
         return;
     }
 
     if (g_emotion == FACE_SLEEPING || blink_now) {
-        lv_point_t ec;
-        rot_pt(ex, ey - 2.0f, &ec);
+        lv_point_t ec = pt(ex, ey - 2.0f);
         lv_draw_arc_dsc_t arc;
         lv_draw_arc_dsc_init(&arc);
         arc.color = (g_emotion == FACE_SLEEPING) ? lv_color_hex(0x64748B) : iris_col;
         arc.width = 4;
         arc.rounded = 1;
-        uint16_t a0 = wrap_deg_360(25 + rot_deg);
-        uint16_t a1 = wrap_deg_360(155 + rot_deg);
-        lv_draw_arc(draw_ctx, &arc, &ec, 16, a0, a1);
+        lv_draw_arc(draw_ctx, &arc, &ec, 16, 25, 155);
         return;
     }
 
@@ -400,48 +410,35 @@ static void draw_single_eye(lv_draw_ctx_t *draw_ctx, float ex, float ey,
     else if (g_emotion == FACE_SURPRISED) eye_r = 22;
     else if (g_emotion == FACE_SAD) eye_r = 16;
 
-    lv_point_t eye_c;
-    rot_pt(ex, ey, &eye_c);
-
-    /* Outer glow halo */
-    draw_filled_circle(draw_ctx, &eye_c, eye_r + 5, iris_col, LV_OPA_20);
-    /* Main eye body */
+    lv_point_t eye_c = pt(ex, ey);
+    draw_filled_circle(draw_ctx, &eye_c, eye_r + 4, iris_col, LV_OPA_20);
     draw_filled_circle(draw_ctx, &eye_c, eye_r, iris_col, LV_OPA_COVER);
 
-    /* Inner deep pupil shifted by gaze */
-    lv_point_t pupil_c;
-    rot_pt(ex + gaze_x, ey + gaze_y, &pupil_c);
+    lv_point_t pupil_c = pt(ex + gaze_x, ey + gaze_y);
     draw_filled_circle(draw_ctx, &pupil_c, eye_r - 7, lv_color_hex(0x0B1220), LV_OPA_90);
 
-    /* Dual 3D specular catchlights (rotate cleanly in eye-local space) */
-    lv_point_t glint1, glint2;
-    rot_pt(ex + gaze_x - 6.0f, ey + gaze_y - 7.0f, &glint1);
-    rot_pt(ex + gaze_x + 5.0f, ey + gaze_y + 5.0f, &glint2);
+    lv_point_t glint1 = pt(ex + gaze_x - 6.0f, ey + gaze_y - 7.0f);
+    lv_point_t glint2 = pt(ex + gaze_x + 5.0f, ey + gaze_y + 5.0f);
     draw_filled_circle(draw_ctx, &glint1, 5, lv_color_white(), LV_OPA_COVER);
     draw_filled_circle(draw_ctx, &glint2, 2, lv_color_white(), LV_OPA_90);
 
-    /* Sad / Alert upper eyelid slant mask */
     if (g_emotion == FACE_SAD) {
         float dir = (ex < 0) ? -1.0f : 1.0f;
-        draw_rot_line(draw_ctx, ex - 18.0f * dir, ey - 10.0f, ex + 18.0f * dir, ey - 18.0f,
-                      8, lv_color_hex(0x0B0F17), LV_OPA_COVER);
+        draw_face_line(draw_ctx, ex - 18.0f * dir, ey - 10.0f, ex + 18.0f * dir, ey - 18.0f,
+                       8, lv_color_hex(0x0B0F17), LV_OPA_COVER);
     } else if (g_emotion == FACE_ALERT) {
         float dir = (ex < 0) ? 1.0f : -1.0f;
-        draw_rot_line(draw_ctx, ex - 18.0f * dir, ey - 16.0f, ex + 18.0f * dir, ey - 9.0f,
-                      8, lv_color_hex(0x0B0F17), LV_OPA_COVER);
+        draw_face_line(draw_ctx, ex - 18.0f * dir, ey - 16.0f, ex + 18.0f * dir, ey - 9.0f,
+                       8, lv_color_hex(0x0B0F17), LV_OPA_COVER);
     }
 }
 
 static void draw_eyebrows(lv_draw_ctx_t *draw_ctx, lv_color_t brow_col)
 {
-    if (g_emotion == FACE_SLEEPING) {
-        return;
-    }
+    if (g_emotion == FACE_SLEEPING) return;
 
-    float ly_in = -38.0f;
-    float ly_out = -36.0f;
-    float ry_in = -38.0f;
-    float ry_out = -36.0f;
+    float ly_in = -38.0f, ly_out = -36.0f;
+    float ry_in = -38.0f, ry_out = -36.0f;
 
     switch (g_emotion) {
     case FACE_HAPPY:
@@ -454,7 +451,6 @@ static void draw_eyebrows(lv_draw_ctx_t *draw_ctx, lv_color_t brow_col)
         ry_in = -48.0f; ry_out = -44.0f;
         break;
     case FACE_THINKING:
-        /* Curious asymmetric brow */
         ly_in = -37.0f; ly_out = -36.0f;
         ry_in = -46.0f; ry_out = -43.0f;
         break;
@@ -470,117 +466,84 @@ static void draw_eyebrows(lv_draw_ctx_t *draw_ctx, lv_color_t brow_col)
         break;
     }
 
-    draw_rot_line(draw_ctx, -50.0f, ly_out, -24.0f, ly_in, 4, brow_col, LV_OPA_90);
-    draw_rot_line(draw_ctx, 24.0f, ry_in, 50.0f, ry_out, 4, brow_col, LV_OPA_90);
+    draw_face_line(draw_ctx, -50.0f, ly_out, -24.0f, ly_in, 4, brow_col, LV_OPA_90);
+    draw_face_line(draw_ctx, 24.0f, ry_in, 50.0f, ry_out, 4, brow_col, LV_OPA_90);
 }
 
-static void draw_mouth(lv_draw_ctx_t *draw_ctx, int rot_deg, lv_color_t accent_col)
+static void draw_mouth(lv_draw_ctx_t *draw_ctx, lv_color_t accent_col)
 {
     if (g_emotion == FACE_SPEAKING || current_mouth > 6) {
-        /* Multi-layered dynamic viseme mouth */
         int open_r = 9 + (current_mouth * 11) / 100;
-        lv_point_t mc;
-        rot_pt(0.0f, 24.0f, &mc);
-
-        /* Outer lip glow + dark mouth cavity */
+        lv_point_t mc = pt(0.0f, 24.0f);
         draw_filled_circle(draw_ctx, &mc, open_r + 3, accent_col, LV_OPA_COVER);
         draw_filled_circle(draw_ctx, &mc, open_r, lv_color_hex(0x0F172A), LV_OPA_COVER);
 
-        /* Warm pink tongue highlight inside lower cavity */
         if (open_r >= 10) {
-            lv_point_t tc;
-            rot_pt(0.0f, 24.0f + open_r * 0.42f, &tc);
+            lv_point_t tc = pt(0.0f, 24.0f + open_r * 0.42f);
             draw_filled_circle(draw_ctx, &tc, open_r / 2, lv_color_hex(0xFB7185), LV_OPA_90);
         }
         return;
     }
 
     if (g_emotion == FACE_SURPRISED) {
-        lv_point_t mc;
-        rot_pt(0.0f, 25.0f, &mc);
+        lv_point_t mc = pt(0.0f, 25.0f);
         draw_filled_circle(draw_ctx, &mc, 12, accent_col, LV_OPA_COVER);
         draw_filled_circle(draw_ctx, &mc, 8, lv_color_hex(0x0F172A), LV_OPA_COVER);
         return;
     }
 
     if (g_emotion == FACE_SAD) {
-        lv_point_t mc;
-        rot_pt(0.0f, 38.0f, &mc);
+        lv_point_t mc = pt(0.0f, 38.0f);
         lv_draw_arc_dsc_t arc;
         lv_draw_arc_dsc_init(&arc);
         arc.color = accent_col;
         arc.width = 4;
         arc.rounded = 1;
-        lv_draw_arc(draw_ctx, &arc, &mc, 18, wrap_deg_360(215 + rot_deg), wrap_deg_360(325 + rot_deg));
+        lv_draw_arc(draw_ctx, &arc, &mc, 18, 215, 325);
         return;
     }
 
     if (g_emotion == FACE_THINKING) {
-        draw_rot_line(draw_ctx, -12.0f, 25.0f, 12.0f, 22.0f, 4, accent_col, LV_OPA_COVER);
+        draw_face_line(draw_ctx, -12.0f, 25.0f, 12.0f, 22.0f, 4, accent_col, LV_OPA_COVER);
         return;
     }
 
     if (g_emotion == FACE_SLEEPING) {
-        lv_point_t mc;
-        rot_pt(0.0f, 24.0f, &mc);
+        lv_point_t mc = pt(0.0f, 24.0f);
         draw_filled_circle(draw_ctx, &mc, 5, lv_color_hex(0x64748B), LV_OPA_80);
         return;
     }
 
-    /* Warm smile arc for IDLE / HAPPY / LISTENING */
-    lv_point_t mc;
-    rot_pt(0.0f, 12.0f, &mc);
+    lv_point_t mc = pt(0.0f, 12.0f);
     lv_draw_arc_dsc_t arc;
     lv_draw_arc_dsc_init(&arc);
     arc.color = accent_col;
     arc.width = (g_emotion == FACE_HAPPY) ? 5 : 4;
     arc.rounded = 1;
     uint16_t span = (g_emotion == FACE_HAPPY) ? 110 : 76;
-    lv_draw_arc(draw_ctx, &arc, &mc, 20,
-                wrap_deg_360(90 - span / 2 + rot_deg),
-                wrap_deg_360(90 + span / 2 + rot_deg));
+    lv_draw_arc(draw_ctx, &arc, &mc, 20, 90 - span / 2, 90 + span / 2);
 }
 
-static void draw_extra_fx(lv_draw_ctx_t *draw_ctx, int rot_deg, lv_color_t accent_col)
+static void draw_extra_fx(lv_draw_ctx_t *draw_ctx, lv_color_t accent_col)
 {
-    /* Animated orbiting dots when THINKING */
     if (g_emotion == FACE_THINKING) {
         for (int i = 0; i < 3; i++) {
-            float phase = (anim_frame * 0.14f) + i * 0.8f;
-            float dx = -16.0f + i * 16.0f;
-            float dy = -56.0f + sinf(phase) * 4.0f;
-            lv_point_t dp;
-            rot_pt(dx, dy, &dp);
+            float phase = (anim_frame * 0.16f) + i * 0.8f;
+            lv_point_t dp = pt(-16.0f + i * 16.0f, -54.0f + sinf(phase) * 4.0f);
             draw_filled_circle(draw_ctx, &dp, 3, accent_col, LV_OPA_90);
         }
     }
 
-    /* Animated floating 'Z' glyphs when SLEEPING */
     if (g_emotion == FACE_SLEEPING) {
         float drift = (float)(anim_frame % 45) * 0.45f;
         float zx = 46.0f;
         float zy = -32.0f - drift;
         float sz = 6.0f;
         lv_opa_t opa = (anim_frame % 45 > 35) ? LV_OPA_40 : LV_OPA_90;
-        draw_rot_line(draw_ctx, zx - sz, zy - sz, zx + sz, zy - sz, 2, lv_color_hex(0x94A3B8), opa);
-        draw_rot_line(draw_ctx, zx + sz, zy - sz, zx - sz, zy + sz, 2, lv_color_hex(0x94A3B8), opa);
-        draw_rot_line(draw_ctx, zx - sz, zy + sz, zx + sz, zy + sz, 2, lv_color_hex(0x94A3B8), opa);
+        draw_face_line(draw_ctx, zx - sz, zy - sz, zx + sz, zy - sz, 2, lv_color_hex(0x94A3B8), opa);
+        draw_face_line(draw_ctx, zx + sz, zy - sz, zx - sz, zy + sz, 2, lv_color_hex(0x94A3B8), opa);
+        draw_face_line(draw_ctx, zx - sz, zy + sz, zx + sz, zy + sz, 2, lv_color_hex(0x94A3B8), opa);
     }
-
-    /* Subtle horizon compass arc along top bezel */
-    lv_point_t center = { .x = 120, .y = 120 };
-    lv_draw_arc_dsc_t ring_dsc;
-    lv_draw_arc_dsc_init(&ring_dsc);
-    ring_dsc.color = lv_color_hex(0x1E293B);
-    ring_dsc.width = 2;
-    lv_draw_arc(draw_ctx, &ring_dsc, &center, 115, 0, 359);
-
-    ring_dsc.color = accent_col;
-    ring_dsc.width = 3;
-    ring_dsc.rounded = 1;
-    ring_dsc.opa = LV_OPA_70;
-    lv_draw_arc(draw_ctx, &ring_dsc, &center, 115,
-                wrap_deg_360(252 + rot_deg), wrap_deg_360(288 + rot_deg));
 }
 
 static void face_draw_event_cb(lv_event_t *e)
@@ -588,7 +551,6 @@ static void face_draw_event_cb(lv_event_t *e)
     lv_draw_ctx_t *draw_ctx = lv_event_get_draw_ctx(e);
     if (!draw_ctx) return;
 
-    int rot_deg = (int)lroundf(g_rot_rad * (180.0f / (float)M_PI));
     bool blink_now = (g_emotion != FACE_SLEEPING && g_emotion != FACE_THINKING &&
                       g_emotion != FACE_HAPPY) && ((anim_frame % 115) >= 110);
 
@@ -605,21 +567,19 @@ static void face_draw_event_cb(lv_event_t *e)
     default: break;
     }
 
-    draw_extra_fx(draw_ctx, rot_deg, iris_col);
+    draw_extra_fx(draw_ctx, iris_col);
 
-    /* Blush cheeks when happy, speaking, or petted */
     if (g_emotion == FACE_HAPPY || g_emotion == FACE_SPEAKING || pet_blush_frames > 0) {
-        lv_point_t b_l, b_r;
-        rot_pt(-54.0f, 14.0f, &b_l);
-        rot_pt(54.0f, 14.0f, &b_r);
+        lv_point_t b_l = pt(-54.0f, 14.0f);
+        lv_point_t b_r = pt(54.0f, 14.0f);
         draw_filled_circle(draw_ctx, &b_l, 9, lv_color_hex(0xFB7185), LV_OPA_40);
         draw_filled_circle(draw_ctx, &b_r, 9, lv_color_hex(0xFB7185), LV_OPA_40);
     }
 
-    draw_single_eye(draw_ctx, -38.0f, -14.0f, rot_deg, iris_col, blink_now);
-    draw_single_eye(draw_ctx, 38.0f, -14.0f, rot_deg, iris_col, blink_now);
+    draw_single_eye(draw_ctx, -38.0f, -14.0f, iris_col, blink_now);
+    draw_single_eye(draw_ctx, 38.0f, -14.0f, iris_col, blink_now);
     draw_eyebrows(draw_ctx, iris_col);
-    draw_mouth(draw_ctx, rot_deg, iris_col);
+    draw_mouth(draw_ctx, iris_col);
 }
 
 /* ============================================================================
@@ -631,7 +591,7 @@ static void build_face_screen(void)
     scr_face = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_face, lv_color_hex(0x0B0F17), 0);
 
-    /* Fullscreen procedural vector canvas */
+    /* Procedural face canvas covering central face region */
     face_canvas = lv_obj_create(scr_face);
     lv_obj_set_size(face_canvas, 240, 240);
     lv_obj_set_pos(face_canvas, 0, 0);
@@ -642,47 +602,46 @@ static void build_face_screen(void)
     lv_obj_add_event_cb(face_canvas, face_tap_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(face_canvas, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
 
-    add_nav_header(scr_face, 0, NULL);
+    add_nav_header(scr_face, NULL);
 
-    /* Top status dot + text (orbital around center) */
     status_dot = lv_obj_create(scr_face);
+    lv_obj_set_size(status_dot, 8, 8);
     lv_obj_set_style_radius(status_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(status_dot, 0, 0);
     lv_obj_set_style_bg_color(status_dot, lv_color_hex(0xF59E0B), 0);
-    register_orbital(status_dot, 0, -24.0f, -94.0f, 8, 8);
+    lv_obj_align(status_dot, LV_ALIGN_TOP_MID, -22, 24);
 
     status_lbl = lv_label_create(scr_face);
     lv_label_set_text(status_lbl, "WAIT");
     lv_obj_set_style_text_color(status_lbl, lv_color_hex(0x94A3B8), 0);
     lv_obj_set_style_text_font(status_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(status_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    register_orbital(status_lbl, 0, 8.0f, -94.0f, 48, 16);
+    lv_obj_align(status_lbl, LV_ALIGN_TOP_MID, 8, 21);
 
     vbat_lbl = lv_label_create(scr_face);
     lv_label_set_text(vbat_lbl, "USB");
     lv_obj_set_style_text_color(vbat_lbl, lv_color_hex(0x64748B), 0);
     lv_obj_set_style_text_font(vbat_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(vbat_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    register_orbital(vbat_lbl, 0, 0.0f, -76.0f, 48, 16);
+    lv_obj_align(vbat_lbl, LV_ALIGN_TOP_MID, 0, 37);
 
-    /* Real-time Synced Subtitle Overlay (orbital at bottom) */
     sub_lbl = lv_label_create(scr_face);
+    lv_obj_set_width(sub_lbl, 168);
     lv_label_set_long_mode(sub_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(sub_lbl, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_text_font(sub_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(sub_lbl, "Tap face to speak");
-    register_orbital(sub_lbl, 0, 0.0f, 68.0f, 164, 34);
+    lv_obj_align(sub_lbl, LV_ALIGN_BOTTOM_MID, 0, -24);
 }
 
 static void build_settings_screen(void)
 {
     scr_settings = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_settings, lv_color_hex(0x0F172A), 0);
-    add_nav_header(scr_settings, 1, "SETTINGS");
+    add_nav_header(scr_settings, "SETTINGS");
 
-    /* Brightness cycle button */
     lv_obj_t *btn_bright = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_bright, 138, 26);
+    lv_obj_align(btn_bright, LV_ALIGN_CENTER, 0, -50);
     lv_obj_set_style_radius(btn_bright, 10, 0);
     lv_obj_set_style_bg_color(btn_bright, lv_color_hex(0x1E293B), 0);
     lv_obj_add_event_cb(btn_bright, bright_cycle_cb, LV_EVENT_CLICKED, NULL);
@@ -690,34 +649,34 @@ static void build_settings_screen(void)
     lv_label_set_text(cfg_bright_lbl, "Bright: 100%");
     lv_obj_set_style_text_font(cfg_bright_lbl, &lv_font_montserrat_12, 0);
     lv_obj_center(cfg_bright_lbl);
-    register_orbital(btn_bright, 1, 0.0f, -50.0f, 136, 26);
 
-    /* Volume row */
     lv_obj_t *btn_vdn = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_vdn, 34, 26);
+    lv_obj_align(btn_vdn, LV_ALIGN_CENTER, -52, -16);
     lv_obj_set_style_bg_color(btn_vdn, lv_color_hex(0x334155), 0);
     lv_obj_add_event_cb(btn_vdn, vol_down_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l_dn = lv_label_create(btn_vdn);
     lv_label_set_text(l_dn, "-");
     lv_obj_center(l_dn);
-    register_orbital(btn_vdn, 1, -52.0f, -16.0f, 34, 26);
 
     cfg_vol_lbl = lv_label_create(scr_settings);
     lv_label_set_text(cfg_vol_lbl, "Vol:75%");
     lv_obj_set_style_text_color(cfg_vol_lbl, lv_color_hex(0xF8FAFC), 0);
     lv_obj_set_style_text_font(cfg_vol_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(cfg_vol_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    register_orbital(cfg_vol_lbl, 1, 0.0f, -16.0f, 62, 18);
+    lv_obj_align(cfg_vol_lbl, LV_ALIGN_CENTER, 0, -16);
 
     lv_obj_t *btn_vup = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_vup, 34, 26);
+    lv_obj_align(btn_vup, LV_ALIGN_CENTER, 52, -16);
     lv_obj_set_style_bg_color(btn_vup, lv_color_hex(0x334155), 0);
     lv_obj_add_event_cb(btn_vup, vol_up_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l_up = lv_label_create(btn_vup);
     lv_label_set_text(l_up, "+");
     lv_obj_center(l_up);
-    register_orbital(btn_vup, 1, 52.0f, -16.0f, 34, 26);
 
-    /* Mic Mode button */
     lv_obj_t *btn_mic = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_mic, 138, 26);
+    lv_obj_align(btn_mic, LV_ALIGN_CENTER, 0, 18);
     lv_obj_set_style_radius(btn_mic, 10, 0);
     lv_obj_set_style_bg_color(btn_mic, lv_color_hex(0x0284C7), 0);
     lv_obj_add_event_cb(btn_mic, mic_mode_cb, LV_EVENT_CLICKED, NULL);
@@ -725,90 +684,86 @@ static void build_settings_screen(void)
     lv_label_set_text(cfg_mic_lbl, "Mic: Auto VAD");
     lv_obj_set_style_text_font(cfg_mic_lbl, &lv_font_montserrat_12, 0);
     lv_obj_center(cfg_mic_lbl);
-    register_orbital(btn_mic, 1, 0.0f, 18.0f, 136, 26);
 
-    /* Rotation Mode button */
     lv_obj_t *btn_rot = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_rot, 138, 26);
+    lv_obj_align(btn_rot, LV_ALIGN_CENTER, 0, 50);
     lv_obj_set_style_radius(btn_rot, 10, 0);
     lv_obj_set_style_bg_color(btn_rot, lv_color_hex(0x4F46E5), 0);
     lv_obj_add_event_cb(btn_rot, rot_mode_cb, LV_EVENT_CLICKED, NULL);
     cfg_rot_lbl = lv_label_create(btn_rot);
-    lv_label_set_text(cfg_rot_lbl, "Rot: Auto 360");
+    lv_label_set_text(cfg_rot_lbl, "Rot: Auto 4-Way");
     lv_obj_set_style_text_font(cfg_rot_lbl, &lv_font_montserrat_12, 0);
     lv_obj_center(cfg_rot_lbl);
-    register_orbital(btn_rot, 1, 0.0f, 50.0f, 136, 26);
 
-    /* BLE Radar switch */
     lv_obj_t *ble_lbl = lv_label_create(scr_settings);
     lv_label_set_text(ble_lbl, "BLE");
     lv_obj_set_style_text_color(ble_lbl, lv_color_hex(0xCBD5E1), 0);
     lv_obj_set_style_text_font(ble_lbl, &lv_font_montserrat_12, 0);
-    register_orbital(ble_lbl, 1, -28.0f, 82.0f, 34, 18);
+    lv_obj_align(ble_lbl, LV_ALIGN_CENTER, -28, 82);
 
     cfg_ble_sw = lv_switch_create(scr_settings);
+    lv_obj_set_size(cfg_ble_sw, 44, 22);
+    lv_obj_align(cfg_ble_sw, LV_ALIGN_CENTER, 22, 82);
     lv_obj_add_state(cfg_ble_sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(cfg_ble_sw, ble_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
-    register_orbital(cfg_ble_sw, 1, 22.0f, 82.0f, 44, 22);
 }
 
 static void build_debug_screen(void)
 {
     scr_debug = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_debug, lv_color_hex(0x090D16), 0);
-    add_nav_header(scr_debug, 2, "DEBUG");
+    add_nav_header(scr_debug, "DEBUG");
 
     dbg_link_lbl = lv_label_create(scr_debug);
     lv_obj_set_style_text_color(dbg_link_lbl, lv_color_hex(0x34D399), 0);
     lv_obj_set_style_text_font(dbg_link_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(dbg_link_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(dbg_link_lbl, "Q:WAIT V:IDLE");
-    register_orbital(dbg_link_lbl, 2, 0.0f, -56.0f, 168, 18);
+    lv_obj_align(dbg_link_lbl, LV_ALIGN_TOP_MID, 0, 56);
 
     dbg_imu_lbl = lv_label_create(scr_debug);
     lv_obj_set_style_text_color(dbg_imu_lbl, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_text_font(dbg_imu_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(dbg_imu_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(dbg_imu_lbl, "IMU: waiting...");
-    register_orbital(dbg_imu_lbl, 2, 0.0f, -32.0f, 184, 18);
+    lv_obj_align(dbg_imu_lbl, LV_ALIGN_TOP_MID, 0, 80);
 
     dbg_ble_lbl = lv_label_create(scr_debug);
     lv_obj_set_style_text_color(dbg_ble_lbl, lv_color_hex(0x93C5FD), 0);
     lv_obj_set_style_text_font(dbg_ble_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(dbg_ble_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(dbg_ble_lbl, "BLE: 0 devs");
-    register_orbital(dbg_ble_lbl, 2, 0.0f, -8.0f, 184, 18);
+    lv_obj_align(dbg_ble_lbl, LV_ALIGN_TOP_MID, 0, 104);
 
     dbg_gpio_lbl = lv_label_create(scr_debug);
     lv_obj_set_style_text_color(dbg_gpio_lbl, lv_color_hex(0xFBBF24), 0);
     lv_obj_set_style_text_font(dbg_gpio_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(dbg_gpio_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(dbg_gpio_lbl, "GPIO: idle");
-    register_orbital(dbg_gpio_lbl, 2, 0.0f, 16.0f, 168, 18);
+    lv_obj_align(dbg_gpio_lbl, LV_ALIGN_TOP_MID, 0, 128);
 
     dbg_sys_lbl = lv_label_create(scr_debug);
     lv_obj_set_style_text_color(dbg_sys_lbl, lv_color_hex(0x94A3B8), 0);
     lv_obj_set_style_text_font(dbg_sys_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_set_style_text_align(dbg_sys_lbl, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(dbg_sys_lbl, "Rot:0 deg");
-    register_orbital(dbg_sys_lbl, 2, 0.0f, 40.0f, 168, 18);
+    lv_label_set_text(dbg_sys_lbl, "Rot:180 deg");
+    lv_obj_align(dbg_sys_lbl, LV_ALIGN_TOP_MID, 0, 152);
 
     lv_obj_t *btn_ping = lv_btn_create(scr_debug);
+    lv_obj_set_size(btn_ping, 62, 26);
+    lv_obj_align(btn_ping, LV_ALIGN_BOTTOM_MID, -36, -28);
     lv_obj_set_style_bg_color(btn_ping, lv_color_hex(0x2563EB), 0);
     lv_obj_add_event_cb(btn_ping, dbg_ping_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lp = lv_label_create(btn_ping);
     lv_label_set_text(lp, "PING");
     lv_obj_set_style_text_font(lp, &lv_font_montserrat_12, 0);
     lv_obj_center(lp);
-    register_orbital(btn_ping, 2, -36.0f, 74.0f, 62, 26);
 
     lv_obj_t *btn_ble = lv_btn_create(scr_debug);
+    lv_obj_set_size(btn_ble, 62, 26);
+    lv_obj_align(btn_ble, LV_ALIGN_BOTTOM_MID, 36, -28);
     lv_obj_set_style_bg_color(btn_ble, lv_color_hex(0x0D9488), 0);
     lv_obj_add_event_cb(btn_ble, dbg_ble_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lb = lv_label_create(btn_ble);
     lv_label_set_text(lb, "BLE");
     lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
     lv_obj_center(lb);
-    register_orbital(btn_ble, 2, 36.0f, 74.0f, 62, 26);
 }
 
 /* ============================================================================
@@ -820,58 +775,14 @@ void ui_screens_init(const ui_callbacks_t *cbs)
     if (cbs) {
         g_cbs = *cbs;
     }
-    orbit_count = 0;
 
     build_face_screen();
     build_settings_screen();
     build_debug_screen();
 
     current_screen_idx = 0;
-    apply_orbital_rotation(0, 0.0f, 0);
+    apply_hardware_orientation(DISPLAY_ORIENTATION_ROTATED_180);
     lv_scr_load(scr_face);
-}
-
-static void update_smooth_rotation(void)
-{
-    float target_rad = g_rot_rad;
-
-    if (rot_mode == 2) {
-        target_rad = 0.0f;
-    } else {
-        imu_data_t imu;
-        imu_qmi8658_get_latest(&imu);
-        if (imu.ready) {
-            float in_plane = sqrtf(imu.ax * imu.ax + imu.ay * imu.ay);
-            if (in_plane > 2.0f) {
-                float raw_rad = atan2f(-imu.ay, -imu.ax);
-                if (rot_mode == 1) {
-                    /* Snap to 0 or 180 deg */
-                    target_rad = (fabsf(raw_rad) > (float)(M_PI * 0.5)) ? (float)M_PI : 0.0f;
-                } else {
-                    target_rad = raw_rad;
-                }
-            }
-        }
-    }
-
-    float diff = target_rad - g_rot_rad;
-    while (diff > (float)M_PI)  diff -= (float)(2.0 * M_PI);
-    while (diff < -(float)M_PI) diff += (float)(2.0 * M_PI);
-
-    if (fabsf(diff) > 0.01f) {
-        g_rot_rad += diff * 0.22f;
-        while (g_rot_rad > (float)M_PI)  g_rot_rad -= (float)(2.0 * M_PI);
-        while (g_rot_rad < -(float)M_PI) g_rot_rad += (float)(2.0 * M_PI);
-    }
-
-    int tenths = (int)lroundf(g_rot_rad * (1800.0f / (float)M_PI));
-    tenths = ((tenths % 3600) + 3600) % 3600;
-    g_rot_tenths_deg = (int16_t)tenths;
-
-    if (abs(g_rot_tenths_deg - last_widget_angle_tenths) >= 15) {
-        last_widget_angle_tenths = g_rot_tenths_deg;
-        apply_orbital_rotation(current_screen_idx, g_rot_rad, g_rot_tenths_deg);
-    }
 }
 
 void ui_screens_tick_anim(void)
@@ -881,10 +792,8 @@ void ui_screens_tick_anim(void)
         pet_blush_frames--;
     }
 
-    /* Update continuous 360-degree gravity rotation */
-    update_smooth_rotation();
+    update_4step_rotation();
 
-    /* Smooth mouth viseme interpolation */
     if (g_emotion == FACE_SPEAKING) {
         current_mouth += (target_mouth - current_mouth) / 2;
         if (current_mouth == 0 && target_mouth > 0) {
@@ -895,7 +804,6 @@ void ui_screens_tick_anim(void)
         current_mouth = 0;
     }
 
-    /* Subtle organic idle gaze wander */
     if ((anim_frame % 75) == 0) {
         if (g_emotion == FACE_IDLE || g_emotion == FACE_HAPPY) {
             int phase = (int)((anim_frame / 75) % 5);
@@ -914,9 +822,10 @@ void ui_screens_tick_anim(void)
     gaze_x += (gaze_target_x - gaze_x) * 0.18f;
     gaze_y += (gaze_target_y - gaze_y) * 0.18f;
 
-    /* Trigger procedural redraw on Face screen */
+    /* Invalidate only the central face bounding box for fast SPI updates */
     if (current_screen_idx == 0 && face_canvas != NULL) {
-        lv_obj_invalidate(face_canvas);
+        static const lv_area_t face_dirty = { .x1 = 35, .y1 = 44, .x2 = 205, .y2 = 166 };
+        lv_obj_invalidate_area(face_canvas, &face_dirty);
     }
 }
 
@@ -975,7 +884,7 @@ void ui_screens_update_telemetry(void)
 
 int ui_screens_get_angle_deg(void)
 {
-    return (int)(g_rot_tenths_deg / 10);
+    return orient_to_deg(current_orient);
 }
 
 void ui_set_emotion(face_emotion_t emo)
