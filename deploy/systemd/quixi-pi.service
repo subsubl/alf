@@ -1,0 +1,15 @@
+[Unit]
+Description=Ixian QuIXI P2P Gateway (Raspberry Pi Zero 2 W Hub)
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/quixi
+ExecStart="/opt/quixi/QuIXI" --config "/opt/quixi/ixian.cfg"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

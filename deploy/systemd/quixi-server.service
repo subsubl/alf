@@ -1,0 +1,15 @@
+[Unit]
+Description=Ixian QuIXI P2P Gateway (Tamagci Remote AI Server)
+After=network-online.target mosquitto.service
+Wants=network-online.target mosquitto.service
+
+[Service]
+Type=simple
+User=tamagci
+WorkingDirectory=/opt/quixi
+ExecStart="/opt/quixi/QuIXI" --config "/opt/quixi/ixian.cfg"
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -10,17 +10,55 @@ import asyncio
 import base64
 import json
 import logging
+import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 from urllib.parse import urlencode
 
-import aiohttp
-import paho.mqtt.client as mqtt
+try:
+    import aiohttp
+except ImportError:
+    aiohttp = None  # type: ignore[assignment]
+
+try:
+    import paho.mqtt.client as mqtt
+except ImportError:
+    mqtt = None  # type: ignore[assignment]
 
 from .spixi_voip import AppDataMessage, SpixiVoIPSessionManager, unpack_app_data_message
 
 logger = logging.getLogger(__name__)
 
 MQCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
+
+
+class QuIXIError(RuntimeError):
+    """Raised when QuIXI REST API returns an HTTP error or JSON-RPC error payload."""
+
+    def __init__(
+        self,
+        message: str,
+        method: str = "",
+        code: Any = None,
+        payload: Any = None,
+    ) -> None:
+        super().__init__(message)
+        self.method = method
+        self.code = code
+        self.payload = payload
+
+
+def is_quixi_ok(res: Any) -> bool:
+    """Return True iff `res` looks like a successful QuIXI REST response."""
+    if not isinstance(res, dict) or not res:
+        return False
+    err = res.get("error")
+    if err is not None and err is not False:
+        return False
+    if "result" in res and res["result"] is None:
+        return False
+    if res.get("ok") is False:
+        return False
+    return True
 
 
 def _extract_b64_bytes(payload: Dict[str, Any]) -> bytes:
@@ -73,6 +111,11 @@ class QuIXIClient:
         self._topic_handlers.setdefault(topic_prefix, []).append(callback)
 
     async def start(self) -> None:
+        if aiohttp is None:
+            raise RuntimeError("aiohttp is required to start QuIXIClient")
+        if mqtt is None:
+            raise RuntimeError("paho-mqtt is required to start QuIXIClient")
+
         self._loop = asyncio.get_running_loop()
         timeout = aiohttp.ClientTimeout(total=15)
         self._http = aiohttp.ClientSession(timeout=timeout)
@@ -100,11 +143,18 @@ class QuIXIClient:
             await self._http.close()
             self._http = None
 
-    def _on_mqtt_connect(self, client: mqtt.Client, userdata: Any, flags: Any, rc: Any, props: Any = None) -> None:
+    def _on_mqtt_connect(self, client: Any, userdata: Any, flags: Any, rc: Any, props: Any = None) -> None:
+        is_failure = getattr(rc, "is_failure", None)
+        failed = bool(is_failure) if is_failure is not None else (rc != 0)
+        if failed:
+            logger.error("Failed to connect to QuIXI MQTT broker at %s:%d (rc=%s)", self.mqtt_host, self.mqtt_port, rc)
+            return
+
         topics = [
             ("AppRequest/#", 0),
             ("AppRequestAccept/#", 0),
             ("AppRequestReject/#", 0),
+            ("AppRequestError/#", 0),
             ("AppData/#", 0),
             ("AppEndSession/#", 0),
             ("AppProtocolData/#", 0),
@@ -113,18 +163,26 @@ class QuIXIClient:
             ("FriendStatusUpdate/#", 0),
         ]
         client.subscribe(topics)
-        if self._loop:
+        if self._loop and not self._loop.is_closed():
             self._loop.call_soon_threadsafe(self._connected_event.set)
         logger.info("Connected to QuIXI MQTT broker at %s:%d", self.mqtt_host, self.mqtt_port)
 
-    def _on_mqtt_message(self, client: mqtt.Client, userdata: Any, msg: mqtt.MQTTMessage) -> None:
+    def _on_mqtt_message(self, client: Any, userdata: Any, msg: Any) -> None:
         try:
             payload = json.loads(msg.payload.decode("utf-8"))
         except Exception as exc:
             logger.warning("Failed to parse MQTT JSON on %s: %s", msg.topic, exc)
             return
 
-        if self._loop is not None:
+        if not isinstance(payload, dict):
+            logger.warning(
+                "Ignoring non-object MQTT JSON payload on %s: %s",
+                msg.topic,
+                type(payload).__name__,
+            )
+            return
+
+        if self._loop is not None and not self._loop.is_closed():
             asyncio.run_coroutine_threadsafe(
                 self._dispatch_mqtt_event(msg.topic, payload),
                 self._loop,
@@ -139,18 +197,24 @@ class QuIXIClient:
             "AppRequest",
             "AppRequestAccept",
             "AppRequestReject",
+            "AppRequestError",
             "AppData",
             "AppEndSession",
         }:
             try:
                 raw_bytes = _extract_b64_bytes(payload)
-                app_msg: AppDataMessage = unpack_app_data_message(raw_bytes)
+                if prefix == "AppRequestError" and not raw_bytes:
+                    app_msg = AppDataMessage(session_id=b"")
+                else:
+                    app_msg = unpack_app_data_message(raw_bytes)
                 if prefix == "AppRequest":
                     await self._voip_manager.on_received_call(sender, app_msg)
                 elif prefix == "AppRequestAccept":
                     await self._voip_manager.on_accepted_call(sender, app_msg)
                 elif prefix == "AppRequestReject":
                     await self._voip_manager.on_rejected_call(app_msg)
+                elif prefix == "AppRequestError":
+                    await self._voip_manager.on_request_error(app_msg, sender)
                 elif prefix == "AppData":
                     await self._voip_manager.on_data(sender, app_msg)
                 elif prefix == "AppEndSession":
@@ -173,9 +237,69 @@ class QuIXIClient:
         url = f"{self.rest_url}/{method}"
         body = {"method": method, "params": params or {}}
         async with self._http.post(url, json=body) as resp:
-            resp.raise_for_status()
             text = await resp.text()
-            return json.loads(text) if text else {}
+            status = getattr(resp, "status", 200)
+            data: Any = None
+            parse_err: Optional[Exception] = None
+            if text:
+                try:
+                    data = json.loads(text)
+                except Exception as exc:
+                    parse_err = exc
+
+            if isinstance(status, int) and status >= 400:
+                if isinstance(data, dict):
+                    err_obj = data.get("error")
+                    if err_obj is not None and err_obj is not False:
+                        code = err_obj.get("code") if isinstance(err_obj, dict) else None
+                        msg = (
+                            err_obj.get("message", str(err_obj))
+                            if isinstance(err_obj, dict)
+                            else str(err_obj)
+                        )
+                        raise QuIXIError(
+                            f"QuIXI {method} HTTP {status}: {msg}",
+                            method=method,
+                            code=code,
+                            payload=data,
+                        )
+                snippet = text.strip()[:200] if text else ""
+                raise QuIXIError(
+                    f"QuIXI {method} HTTP {status}: {snippet}" if snippet else f"QuIXI {method} HTTP {status}",
+                    method=method,
+                    code=status,
+                    payload=data if data is not None else text,
+                )
+
+            resp.raise_for_status()
+
+            if not text:
+                return {}
+            if parse_err is not None:
+                raise QuIXIError(
+                    f"QuIXI {method} returned invalid JSON: {parse_err}",
+                    method=method,
+                    payload=text,
+                ) from parse_err
+
+            if isinstance(data, dict):
+                err_obj = data.get("error")
+                if err_obj is not None and err_obj is not False:
+                    code = err_obj.get("code") if isinstance(err_obj, dict) else None
+                    msg = (
+                        err_obj.get("message", str(err_obj))
+                        if isinstance(err_obj, dict)
+                        else str(err_obj)
+                    )
+                    raise QuIXIError(
+                        f"QuIXI {method} error: {msg}",
+                        method=method,
+                        code=code,
+                        payload=data,
+                    )
+                return data
+
+            return {"result": data}
 
     async def contacts(self) -> Dict[str, Any]:
         return await self._call_api("contacts")
@@ -201,6 +325,8 @@ class QuIXIClient:
         is_stream: bool = True,
         channel: int = 0,
     ) -> Dict[str, Any]:
+        if is_stream and not message_id_b64:
+            message_id_b64 = base64.b64encode(uuid.uuid4().bytes).decode("ascii")
         params: Dict[str, str] = {
             "address": address,
             "message": message,

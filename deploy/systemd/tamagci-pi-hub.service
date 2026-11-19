@@ -1,0 +1,17 @@
+[Unit]
+Description=Tamagci Connected AI Companion Pi Zero 2 W Hub
+After=network-online.target mosquitto.service quixi-pi.service bluetooth.target
+Wants=quixi-pi.service mosquitto.service
+
+[Service]
+Type=simple
+User=pi
+SupplementaryGroups=dialout audio bluetooth
+Environment=XDG_RUNTIME_DIR=/run/user/%U
+WorkingDirectory=/opt/tamagci
+ExecStart="/opt/tamagci/pi_hub/.venv/bin/python" "/opt/tamagci/pi_hub/main_hub.py"
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

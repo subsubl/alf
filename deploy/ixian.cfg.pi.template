@@ -1,0 +1,21 @@
+# Ixian QuIXI Configuration Template — Tier 2 Raspberry Pi Zero 2 W
+# Stage to /opt/quixi/ixian.cfg (chmod 600). Do NOT commit live wallet/config files.
+# Zero-Trust Edge Model: NEVER store LLM/STT/TTS credentials in this file or on the Pi.
+
+# Local QuIXI HTTP REST API (used by pi_hub/main_hub.py via http://127.0.0.1:8001)
+apiPort = 8001
+apiBinds = http://127.0.0.1:8001/
+
+# Local Mosquitto MQTT Broker (used by common_ixian/quixi_client.py)
+mqDriver = mqtt
+mqHost = 127.0.0.1
+mqPort = 1883
+
+# Ixian Network Selection (default: mainnet)
+networkType = mainnet
+# For Ixian testnet development, comment out mainnet above and uncomment below:
+# networkType = testnet
+
+# Wallet Encryption Password
+# Replace with a unique, strong passphrase before starting quixi-pi.service
+walletPassword = REPLACE_WITH_STRONG_WALLET_PASSWORD

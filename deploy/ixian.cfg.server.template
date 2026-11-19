@@ -1,0 +1,20 @@
+# Ixian QuIXI Configuration Template — Tier 3 Remote AI Server
+# Stage to /opt/quixi/ixian.cfg (chmod 600). Do NOT commit live wallet/config files.
+
+# Local QuIXI HTTP REST API (used by server_agent/main_server.py via http://127.0.0.1:8001)
+apiPort = 8001
+apiBinds = http://127.0.0.1:8001/
+
+# Local Mosquitto MQTT Broker (used by common_ixian/quixi_client.py)
+mqDriver = mqtt
+mqHost = 127.0.0.1
+mqPort = 1883
+
+# Ixian Network Selection (default: mainnet)
+networkType = mainnet
+# For Ixian testnet development, comment out mainnet above and uncomment below:
+# networkType = testnet
+
+# Wallet Encryption Password
+# Replace with a unique, strong passphrase before starting quixi-server.service
+walletPassword = REPLACE_WITH_STRONG_WALLET_PASSWORD
