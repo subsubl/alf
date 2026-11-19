@@ -56,7 +56,7 @@ mkdir -p "${MNT}/opt/tamagci" "${MNT}/opt/quixi"
 tar -C "${REPO_DIR}" \
     --exclude=.git --exclude=.github --exclude=esp32_face_os --exclude=server_agent \
     --exclude='*.img' --exclude='*.img.xz' --exclude='*.iso' --exclude='*.sha256' \
-    --exclude='quixi*' --exclude='scratch' --exclude='build' \
+    --exclude='quixi-linux-arm64' --exclude='QuIXI' --exclude='scratch' --exclude='build' \
     --exclude='__pycache__' --exclude='.venv' --exclude='.mypy_cache' --exclude='.pytest_cache' \
     -cf - . | tar -C "${MNT}/opt/tamagci" -xf -
 cp -a "${QUIXI_SRC}/." "${MNT}/opt/quixi/"
