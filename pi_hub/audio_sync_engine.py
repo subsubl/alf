@@ -23,12 +23,12 @@ except ImportError:  # pragma: no cover
 
 try:
     import sounddevice as sd
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     sd = None
 
 try:
     import webrtcvad
-except ImportError:  # pragma: no cover
+except Exception:  # pragma: no cover
     webrtcvad = None
 
 logger = logging.getLogger(__name__)

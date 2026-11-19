@@ -649,7 +649,18 @@ def install_dependency_stubs() -> Dict[str, bool]:
         stubbed["dotenv"] = False
 
     # 8. sounddevice
-    if not _is_available("sounddevice"):
+    sd_working = False
+    if "sounddevice" in sys.modules:
+        sd_working = hasattr(sys.modules["sounddevice"], "RawInputStream")
+    elif _is_available("sounddevice"):
+        try:
+            mod = importlib.import_module("sounddevice")
+            sd_working = hasattr(mod, "RawInputStream")
+        except Exception:
+            sd_working = False
+            sys.modules.pop("sounddevice", None)
+
+    if not sd_working:
         sd_mod = types.ModuleType("sounddevice")
 
         class _StubStream:

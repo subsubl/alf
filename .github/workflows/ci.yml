@@ -42,10 +42,14 @@ jobs:
           pip install -r pi_hub/requirements.txt -r server_agent/requirements.txt pytest
 
       - name: Spixi VoIP / AppDataMessage protocol tests
+        env:
+          PYTHONPATH: .
         run: python tools/test_ixian_voip.py -v
 
       - name: Unit, security and offline E2E suites
-        run: python -m pytest tests tools/test_ixian_voip.py -v
+        env:
+          PYTHONPATH: .
+        run: python -m pytest tests -v
 
   lint-shell:
     name: ShellCheck (deploy scripts)
