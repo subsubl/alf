@@ -32,7 +32,7 @@ static bool parse_ad_name_cb(struct bt_data *data, void *user_data)
 {
     char *name_buf = (char *)user_data;
     if (data->type == BT_DATA_NAME_COMPLETE || data->type == BT_DATA_NAME_SHORTENED) {
-        sanitize_name(data->data, data->data_len, name_buf, 20);
+        sanitize_name(data->data, data->data_len, name_buf, 32);
         return false; /* stop parsing */
     }
     return true;
@@ -57,7 +57,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
              addr->a.val[5], addr->a.val[4], addr->a.val[3],
              addr->a.val[2], addr->a.val[1], addr->a.val[0]);
 
-    char parsed_name[20] = {0};
+    char parsed_name[32] = {0};
     if (ad != NULL && ad->len > 0) {
         bt_data_parse(ad, parse_ad_name_cb, parsed_name);
     }
@@ -74,7 +74,8 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 
     for (int i = 0; i < BLE_MAX_DEVICES; i++) {
         if (dev_table[i].active) {
-            if (strcmp(dev_table[i].mac, mac_str) == 0) {
+            if (strcmp(dev_table[i].mac, mac_str) == 0 &&
+                dev_table[i].addr_type == addr->type) {
                 match_idx = i;
                 break;
             }
@@ -89,6 +90,7 @@ static void scan_cb(const bt_addr_le_t *addr, int8_t rssi, uint8_t type,
 
     int target = (match_idx >= 0) ? match_idx : ((empty_idx >= 0) ? empty_idx : oldest_idx);
     dev_table[target].active = true;
+    dev_table[target].addr_type = addr->type;
     strncpy(dev_table[target].mac, mac_str, sizeof(dev_table[target].mac) - 1);
     dev_table[target].mac[sizeof(dev_table[target].mac) - 1] = '\0';
     dev_table[target].rssi = rssi;
@@ -180,12 +182,12 @@ bool ble_scanner_get_strongest(char *mac_out, size_t mac_len,
 {
     int64_t now = k_uptime_get();
     int best_idx = -1;
-    int8_t best_rssi = -127;
+    int8_t best_rssi = INT8_MIN;
 
     k_mutex_lock(&ble_mutex, K_FOREVER);
     prune_stale_locked(now);
     for (int i = 0; i < BLE_MAX_DEVICES; i++) {
-        if (dev_table[i].active && dev_table[i].rssi > best_rssi) {
+        if (dev_table[i].active && (best_idx < 0 || dev_table[i].rssi > best_rssi)) {
             best_rssi = dev_table[i].rssi;
             best_idx = i;
         }
@@ -209,7 +211,7 @@ bool ble_scanner_get_strongest(char *mac_out, size_t mac_len,
     return best_idx >= 0;
 }
 
-int ble_scanner_format_json(char *buf, size_t len)
+int ble_scanner_format_json_ex(char *buf, size_t len, int *cnt_out)
 {
     if (!buf || len < 3) {
         return -EINVAL;
@@ -219,6 +221,7 @@ int ble_scanner_format_json(char *buf, size_t len)
     size_t pos = 0;
     buf[pos++] = '[';
     bool first = true;
+    int count = 0;
 
     k_mutex_lock(&ble_mutex, K_FOREVER);
     prune_stale_locked(now);
@@ -227,23 +230,33 @@ int ble_scanner_format_json(char *buf, size_t len)
         if (!dev_table[i].active) {
             continue;
         }
-        char entry[80];
+        char entry[128];
         int n = snprintf(entry, sizeof(entry),
-                         "%s{\"mac\":\"%s\",\"name\":\"%s\",\"rssi\":%d}",
+                         "%s{\"mac\":\"%s\",\"type\":%u,\"name\":\"%s\",\"rssi\":%d}",
                          first ? "" : ",",
                          dev_table[i].mac,
+                         (unsigned int)dev_table[i].addr_type,
                          dev_table[i].name[0] ? dev_table[i].name : "?",
                          (int)dev_table[i].rssi);
-        if (n < 0 || pos + (size_t)n + 2 >= len) {
+        if (n < 0 || (size_t)n >= sizeof(entry) || pos + (size_t)n + 2 > len) {
             break;
         }
         memcpy(buf + pos, entry, (size_t)n);
         pos += (size_t)n;
         first = false;
+        count++;
     }
     k_mutex_unlock(&ble_mutex);
 
+    if (cnt_out) {
+        *cnt_out = count;
+    }
     buf[pos++] = ']';
     buf[pos] = '\0';
     return (int)pos;
+}
+
+int ble_scanner_format_json(char *buf, size_t len)
+{
+    return ble_scanner_format_json_ex(buf, len, NULL);
 }

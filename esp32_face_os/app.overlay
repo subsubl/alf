@@ -1,25 +1,25 @@
 #include <zephyr/dt-bindings/adc/adc.h>
+#include <zephyr/dt-bindings/pinctrl/esp32s3-pinctrl.h>
 
 / {
-	aliases {
-		backlight = &backlight_pin;
-	};
-
-	leds {
-		compatible = "gpio-leds";
-		backlight_pin: backlight_pin {
-			gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
-			label = "LCD Backlight";
-		};
-	};
-
 	zephyr,user {
 		io-channels = <&adc0 0>;
 	};
 };
 
+&uart0 {
+	current-speed = <921600>;
+};
+
+&ledc0_default {
+	group1 {
+		pinmux = <LEDC_CH0_GPIO2>;
+		output-enable;
+	};
+};
+
 &ledc0 {
-	status = "disabled";
+	status = "okay";
 };
 
 &gc9a01 {

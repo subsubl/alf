@@ -1,5 +1,6 @@
 #include "gpio_agent.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <zephyr/device.h>
@@ -77,20 +78,9 @@ int gpio_agent_init(void)
     return 0;
 }
 
-int gpio_agent_configure(int pin, const char *dir, const char *pull, int initial_val)
+static int configure_pin_locked(int pin, const struct device *port, gpio_pin_t hw_pin,
+                                int slot, const char *dir, const char *pull, int initial_val)
 {
-    const struct device *port = NULL;
-    gpio_pin_t hw_pin = 0;
-    int slot = -1;
-
-    int err = resolve_pin(pin, &port, &hw_pin, &slot);
-    if (err != 0) {
-        k_mutex_lock(&gpio_mutex, K_FOREVER);
-        snprintf(last_gpio_status, sizeof(last_gpio_status), "GPIO %d: DENIED", pin);
-        k_mutex_unlock(&gpio_mutex);
-        return err;
-    }
-
     gpio_flags_t flags = 0;
     bool is_out = (dir != NULL && strcmp(dir, "out") == 0);
 
@@ -107,8 +97,7 @@ int gpio_agent_configure(int pin, const char *dir, const char *pull, int initial
         }
     }
 
-    err = gpio_pin_configure(port, hw_pin, flags);
-    k_mutex_lock(&gpio_mutex, K_FOREVER);
+    int err = gpio_pin_configure(port, hw_pin, flags);
     if (err == 0) {
         pin_configured_out[slot] = is_out;
         pin_configured_in[slot] = !is_out;
@@ -117,6 +106,40 @@ int gpio_agent_configure(int pin, const char *dir, const char *pull, int initial
     } else {
         snprintf(last_gpio_status, sizeof(last_gpio_status), "P%d ERR %d", pin, err);
     }
+    return err;
+}
+
+static bool is_valid_dir(const char *dir)
+{
+    return dir != NULL && (strcmp(dir, "in") == 0 || strcmp(dir, "out") == 0);
+}
+
+static bool is_valid_pull(const char *pull)
+{
+    return pull == NULL || strcmp(pull, "none") == 0 ||
+           strcmp(pull, "up") == 0 || strcmp(pull, "down") == 0;
+}
+
+int gpio_agent_configure(int pin, const char *dir, const char *pull, int initial_val)
+{
+    if (!is_valid_dir(dir) || !is_valid_pull(pull)) {
+        return -EINVAL;
+    }
+
+    const struct device *port = NULL;
+    gpio_pin_t hw_pin = 0;
+    int slot = -1;
+
+    int err = resolve_pin(pin, &port, &hw_pin, &slot);
+    if (err != 0) {
+        k_mutex_lock(&gpio_mutex, K_FOREVER);
+        snprintf(last_gpio_status, sizeof(last_gpio_status), "GPIO %d: DENIED", pin);
+        k_mutex_unlock(&gpio_mutex);
+        return err;
+    }
+
+    k_mutex_lock(&gpio_mutex, K_FOREVER);
+    err = configure_pin_locked(pin, port, hw_pin, slot, dir, pull, initial_val);
     k_mutex_unlock(&gpio_mutex);
 
     return err;
@@ -133,12 +156,14 @@ int gpio_agent_set(int pin, int val)
         return err;
     }
 
+    k_mutex_lock(&gpio_mutex, K_FOREVER);
     if (!pin_configured_out[slot]) {
-        return gpio_agent_configure(pin, "out", "none", val ? 1 : 0);
+        err = configure_pin_locked(pin, port, hw_pin, slot, "out", "none", val ? 1 : 0);
+        k_mutex_unlock(&gpio_mutex);
+        return err;
     }
 
     err = gpio_pin_set(port, hw_pin, val ? 1 : 0);
-    k_mutex_lock(&gpio_mutex, K_FOREVER);
     if (err == 0) {
         snprintf(last_gpio_status, sizeof(last_gpio_status), "P%d OUT=%d", pin, val ? 1 : 0);
     }
@@ -158,15 +183,18 @@ int gpio_agent_get(int pin, int *val_out)
         return err;
     }
 
+    k_mutex_lock(&gpio_mutex, K_FOREVER);
     if (!pin_configured_out[slot] && !pin_configured_in[slot]) {
-        err = gpio_agent_configure(pin, "in", "none", 0);
+        err = configure_pin_locked(pin, port, hw_pin, slot, "in", "none", 0);
         if (err != 0) {
+            k_mutex_unlock(&gpio_mutex);
             return err;
         }
     }
 
     int val = gpio_pin_get(port, hw_pin);
     if (val < 0) {
+        k_mutex_unlock(&gpio_mutex);
         return val;
     }
 
@@ -174,7 +202,6 @@ int gpio_agent_get(int pin, int *val_out)
         *val_out = val;
     }
 
-    k_mutex_lock(&gpio_mutex, K_FOREVER);
     snprintf(last_gpio_status, sizeof(last_gpio_status), "P%d READ=%d", pin, val);
     k_mutex_unlock(&gpio_mutex);
 
@@ -184,7 +211,9 @@ int gpio_agent_get(int pin, int *val_out)
 int gpio_agent_read_vbat_mv(void)
 {
 #if DT_NODE_EXISTS(DT_PATH(zephyr_user)) && DT_NODE_HAS_PROP(DT_PATH(zephyr_user), io_channels)
+    k_mutex_lock(&gpio_mutex, K_FOREVER);
     if (!adc_ready) {
+        k_mutex_unlock(&gpio_mutex);
         return 0;
     }
 
@@ -195,11 +224,14 @@ int gpio_agent_read_vbat_mv(void)
     };
 
     if (adc_sequence_init_dt(&vbat_adc, &seq) < 0) {
+        k_mutex_unlock(&gpio_mutex);
         return 0;
     }
     if (adc_read_dt(&vbat_adc, &seq) < 0) {
+        k_mutex_unlock(&gpio_mutex);
         return 0;
     }
+    k_mutex_unlock(&gpio_mutex);
 
     int32_t mv = buf;
     if (adc_raw_to_millivolts_dt(&vbat_adc, &mv) < 0) {

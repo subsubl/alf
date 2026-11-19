@@ -8,7 +8,17 @@ typedef enum {
     IMU_GESTURE_NONE = 0,
     IMU_GESTURE_SHAKE,
     IMU_GESTURE_TILT,
+    IMU_GESTURE_PICKUP,
+    IMU_GESTURE_DOUBLE_TAP,
 } imu_gesture_t;
+
+typedef struct {
+    imu_gesture_t gest;
+    float ax;
+    float ay;
+    float az;
+    float temp_c;
+} imu_gesture_event_t;
 
 typedef struct {
     bool ready;
@@ -31,11 +41,10 @@ typedef struct {
 int imu_qmi8658_init(void);
 
 /**
- * @brief Poll current IMU readings and detect motion gestures.
- * @param out Optional pointer to copy current IMU state into.
- * @return Newly detected gesture during this poll (or IMU_GESTURE_NONE).
+ * @brief Pop the next queued gesture event detected by the 50Hz IMU thread.
+ * @return true if an event was popped into out, false if queue is empty.
  */
-imu_gesture_t imu_qmi8658_poll(imu_data_t *out);
+bool imu_qmi8658_pop_gesture(imu_gesture_event_t *out);
 
 /**
  * @brief Get cached latest IMU state.

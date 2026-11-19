@@ -18,8 +18,8 @@ typedef enum {
 
 typedef struct {
     void (*on_face_tap)(bool currently_speaking);
-    void (*on_cfg_change)(int bright, int vol, const char *mic_mode, int ble_en);
-    void (*on_dbg_ping)(void);
+    void (*on_cfg_change)(int bright, int vol, const char *mic_mode, int ble_en, int sleep_s);
+    void (*on_dbg_test_call)(void);
     void (*on_dbg_ble_refresh)(void);
 } ui_callbacks_t;
 
@@ -68,5 +68,15 @@ void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const c
  * @brief Update current mic active state (listening indicator).
  */
 void ui_set_mic_active(bool active);
+
+/**
+ * @brief Host-callable non-echoing config setters (update PWM / UI without emitting evt.cfg).
+ */
+void ui_set_brightness(int pct);
+int ui_get_brightness(void);
+void ui_set_volume(int vol);
+void ui_set_mic_mode_str(const char *mode);
+void ui_set_ble_enabled_ui(bool enabled);
+void ui_set_sleep_timeout_s(int sleep_s);
 
 #endif /* UI_SCREENS_H */

@@ -42,12 +42,21 @@ ${SUDO} apt-get install -y \
     jq
 
 echo "[2/6] Enabling Mosquitto MQTT and Bluetooth services..."
-${SUDO} systemctl enable --now mosquitto
-${SUDO} systemctl enable --now bluetooth
+if [[ "${TAMAGCI_IMAGE_BUILD:-0}" == "1" ]]; then
+    # Offline chroot (image build): no running systemd, so only create enable symlinks.
+    ${SUDO} systemctl enable mosquitto
+    ${SUDO} systemctl enable bluetooth
+else
+    ${SUDO} systemctl enable --now mosquitto
+    ${SUDO} systemctl enable --now bluetooth
+fi
 
 echo "[3/6] Configuring hardware permissions for user '${TARGET_USER}'..."
 ${SUDO} usermod -aG dialout,audio,bluetooth "${TARGET_USER}"
-if command -v loginctl >/dev/null 2>&1; then
+if [[ "${TAMAGCI_IMAGE_BUILD:-0}" == "1" ]]; then
+    ${SUDO} mkdir -p /var/lib/systemd/linger
+    ${SUDO} touch "/var/lib/systemd/linger/${TARGET_USER}"
+elif command -v loginctl >/dev/null 2>&1; then
     ${SUDO} loginctl enable-linger "${TARGET_USER}" || true
 fi
 
@@ -106,7 +115,9 @@ print(text, end="")
 
 render_unit "${REPO_DIR}/deploy/systemd/quixi-pi.service" "/etc/systemd/system/quixi-pi.service"
 render_unit "${REPO_DIR}/deploy/systemd/tamagci-pi-hub.service" "/etc/systemd/system/tamagci-pi-hub.service"
-${SUDO} systemctl daemon-reload
+if [[ "${TAMAGCI_IMAGE_BUILD:-0}" != "1" ]]; then
+    ${SUDO} systemctl daemon-reload
+fi
 
 echo ""
 echo "Raspberry Pi Zero 2 W setup complete. Next steps:"

@@ -3,6 +3,7 @@
 #include "gpio_agent.h"
 #include "imu_qmi8658.h"
 
+#include <limits.h>
 #include <lvgl.h>
 #include <lvgl_display.h>
 #include <math.h>
@@ -12,7 +13,12 @@
 #include <zephyr/device.h>
 #include <zephyr/devicetree.h>
 #include <zephyr/drivers/display.h>
+#include <zephyr/drivers/pwm.h>
 #include <zephyr/kernel.h>
+#include <zephyr/sys/sys_heap.h>
+
+extern struct k_heap _system_heap;
+static const struct pwm_dt_spec pwm_lcd0 = PWM_DT_SPEC_GET(DT_ALIAS(pwm_lcd0));
 
 static ui_callbacks_t g_cbs;
 
@@ -20,25 +26,33 @@ static ui_callbacks_t g_cbs;
 static lv_obj_t *scr_face;
 static lv_obj_t *scr_settings;
 static lv_obj_t *scr_debug;
+static lv_obj_t *wake_shield;
 static int current_screen_idx;
 
 /* Face screen widgets */
 static lv_obj_t *face_canvas;
+static lv_obj_t *status_arc;
 static lv_obj_t *status_dot;
 static lv_obj_t *status_lbl;
 static lv_obj_t *vbat_lbl;
+static lv_obj_t *sub_box;
 static lv_obj_t *sub_lbl;
 
 /* Settings screen widgets */
 static lv_obj_t *cfg_bright_lbl;
+static lv_obj_t *cfg_bright_sl;
 static lv_obj_t *cfg_vol_lbl;
 static lv_obj_t *cfg_mic_lbl;
 static lv_obj_t *cfg_rot_lbl;
+static lv_obj_t *cfg_sleep_lbl;
 static lv_obj_t *cfg_ble_sw;
 static int cfg_bright = 100;
 static int cfg_vol = 75;
-static bool cfg_mic_vad = true;
+static int cfg_mic_mode = 0; /* 0="vad", 1="ptt", 2="duplex" */
 static bool cfg_ble_en = true;
+static const int sleep_options_s[3] = { 30, 120, 0 };
+static int cfg_sleep_idx = 1; /* default: 2m (120s) */
+static bool display_dimmed = false;
 
 /* 4-Step Hardware Rotation: 0 = Auto 4-Way, 1 = Auto Flip 0/180, 2 = Lock Upright (180) */
 static int rot_mode = 0;
@@ -236,6 +250,43 @@ static void add_nav_header(lv_obj_t *parent, const char *title)
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_GESTURE_BUBBLE);
 }
 
+static void apply_backlight_pct(int pct)
+{
+    if (!pwm_is_ready_dt(&pwm_lcd0)) {
+        return;
+    }
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    uint32_t pulse = (uint32_t)(((uint64_t)pwm_lcd0.period * (uint32_t)pct) / 100U);
+    /*
+     * The ESP32 LEDC Zephyr driver computes duty = 2^resolution at 100%, which overflows
+     * the hardware duty field and wraps to 0 (backlight OFF). Cap just below full scale.
+     */
+    uint32_t max_pulse = pwm_lcd0.period - (pwm_lcd0.period / 256U) - 1U;
+    if (pulse > max_pulse) {
+        pulse = max_pulse;
+    }
+    pwm_set_pulse_dt(&pwm_lcd0, pulse);
+}
+
+static void ui_wake_display(void)
+{
+    lv_disp_trig_activity(NULL);
+    if (display_dimmed) {
+        display_dimmed = false;
+        apply_backlight_pct(cfg_bright);
+        if (wake_shield) {
+            lv_obj_add_flag(wake_shield, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
+static void wake_shield_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    ui_wake_display();
+}
+
 static void face_tap_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
@@ -245,24 +296,54 @@ static void face_tap_cb(lv_event_t *e)
     }
 }
 
+static const char *mic_mode_str_from_idx(int idx)
+{
+    if (idx == 1) return "ptt";
+    if (idx == 2) return "duplex";
+    return "vad";
+}
+
+static const char *mic_mode_label_from_idx(int idx)
+{
+    if (idx == 1) return "Mic: Tap PTT";
+    if (idx == 2) return "Mic: Duplex";
+    return "Mic: Auto VAD";
+}
+
+static const char *sleep_label_from_idx(int idx)
+{
+    if (idx == 0) return "Sleep: 30s";
+    if (idx == 2) return "Sleep: Never";
+    return "Sleep: 2m";
+}
+
 static void emit_cfg(void)
 {
     if (g_cbs.on_cfg_change) {
-        g_cbs.on_cfg_change(cfg_bright, cfg_vol, cfg_mic_vad ? "vad" : "ptt", cfg_ble_en ? 1 : 0);
+        g_cbs.on_cfg_change(cfg_bright, cfg_vol,
+                            mic_mode_str_from_idx(cfg_mic_mode),
+                            cfg_ble_en ? 1 : 0,
+                            sleep_options_s[cfg_sleep_idx]);
     }
 }
 
-static void bright_cycle_cb(lv_event_t *e)
+static void bright_slider_cb(lv_event_t *e)
 {
-    LV_UNUSED(e);
-    if (cfg_bright == 100) cfg_bright = 25;
-    else if (cfg_bright == 25) cfg_bright = 50;
-    else cfg_bright = 100;
-
-    char buf[24];
-    snprintf(buf, sizeof(buf), "Bright: %d%%", cfg_bright);
-    lv_label_set_text(cfg_bright_lbl, buf);
-    emit_cfg();
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_VALUE_CHANGED) {
+        int val = (int)lv_slider_get_value(cfg_bright_sl);
+        if (val < 10) val = 10;
+        if (val > 100) val = 100;
+        cfg_bright = val;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Bright: %d%%", cfg_bright);
+        lv_label_set_text(cfg_bright_lbl, buf);
+        if (!display_dimmed) {
+            apply_backlight_pct(cfg_bright);
+        }
+    } else if (code == LV_EVENT_RELEASED) {
+        emit_cfg();
+    }
 }
 
 static void vol_down_cb(lv_event_t *e)
@@ -290,8 +371,8 @@ static void vol_up_cb(lv_event_t *e)
 static void mic_mode_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    cfg_mic_vad = !cfg_mic_vad;
-    lv_label_set_text(cfg_mic_lbl, cfg_mic_vad ? "Mic: Auto VAD" : "Mic: Tap PTT");
+    cfg_mic_mode = (cfg_mic_mode + 1) % 3;
+    lv_label_set_text(cfg_mic_lbl, mic_mode_label_from_idx(cfg_mic_mode));
     emit_cfg();
 }
 
@@ -306,6 +387,15 @@ static void rot_mode_cb(lv_event_t *e)
     } else {
         lv_label_set_text(cfg_rot_lbl, "Rot: Lock Up");
     }
+    emit_cfg();
+}
+
+static void sleep_mode_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    cfg_sleep_idx = (cfg_sleep_idx + 1) % 3;
+    lv_label_set_text(cfg_sleep_lbl, sleep_label_from_idx(cfg_sleep_idx));
+    emit_cfg();
 }
 
 static void ble_switch_cb(lv_event_t *e)
@@ -316,11 +406,11 @@ static void ble_switch_cb(lv_event_t *e)
     emit_cfg();
 }
 
-static void dbg_ping_cb(lv_event_t *e)
+static void dbg_test_call_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    if (g_cbs.on_dbg_ping) {
-        g_cbs.on_dbg_ping();
+    if (g_cbs.on_dbg_test_call) {
+        g_cbs.on_dbg_test_call();
     }
 }
 
@@ -602,6 +692,23 @@ static void build_face_screen(void)
     lv_obj_add_event_cb(face_canvas, face_tap_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(face_canvas, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
 
+    /* Top link status arc (235..305 deg) */
+    status_arc = lv_arc_create(scr_face);
+    lv_obj_set_size(status_arc, 226, 226);
+    lv_obj_align(status_arc, LV_ALIGN_CENTER, 0, 0);
+    lv_arc_set_bg_angles(status_arc, 235, 305);
+    lv_arc_set_angles(status_arc, 235, 305);
+    lv_obj_set_style_arc_width(status_arc, 4, LV_PART_MAIN);
+    lv_obj_set_style_arc_width(status_arc, 4, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_rounded(status_arc, true, LV_PART_MAIN);
+    lv_obj_set_style_arc_rounded(status_arc, true, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(status_arc, lv_color_hex(0x334155), LV_PART_MAIN);
+    lv_obj_set_style_arc_opa(status_arc, LV_OPA_30, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(status_arc, lv_color_hex(0xF59E0B), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(status_arc, LV_OPA_TRANSP, LV_PART_KNOB);
+    lv_obj_set_style_pad_all(status_arc, 0, LV_PART_KNOB);
+    lv_obj_clear_flag(status_arc, LV_OBJ_FLAG_CLICKABLE);
+
     add_nav_header(scr_face, NULL);
 
     status_dot = lv_obj_create(scr_face);
@@ -623,14 +730,24 @@ static void build_face_screen(void)
     lv_obj_set_style_text_font(vbat_lbl, &lv_font_montserrat_12, 0);
     lv_obj_align(vbat_lbl, LV_ALIGN_TOP_MID, 0, 37);
 
-    sub_lbl = lv_label_create(scr_face);
-    lv_obj_set_width(sub_lbl, 168);
+    /* Clipped non-scrollable subtitle box below mouth (y = 172..218) */
+    sub_box = lv_obj_create(scr_face);
+    lv_obj_set_size(sub_box, 164, 46);
+    lv_obj_align(sub_box, LV_ALIGN_BOTTOM_MID, 0, -22);
+    lv_obj_set_style_bg_opa(sub_box, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(sub_box, 0, 0);
+    lv_obj_set_style_pad_all(sub_box, 2, 0);
+    lv_obj_clear_flag(sub_box, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(sub_box, LV_OBJ_FLAG_CLICKABLE);
+
+    sub_lbl = lv_label_create(sub_box);
+    lv_obj_set_width(sub_lbl, 156);
     lv_label_set_long_mode(sub_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(sub_lbl, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_text_font(sub_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(sub_lbl, "Tap face to speak");
-    lv_obj_align(sub_lbl, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_align(sub_lbl, LV_ALIGN_BOTTOM_MID, 0, 0);
 }
 
 static void build_settings_screen(void)
@@ -639,20 +756,24 @@ static void build_settings_screen(void)
     lv_obj_set_style_bg_color(scr_settings, lv_color_hex(0x0F172A), 0);
     add_nav_header(scr_settings, "SETTINGS");
 
-    lv_obj_t *btn_bright = lv_btn_create(scr_settings);
-    lv_obj_set_size(btn_bright, 138, 26);
-    lv_obj_align(btn_bright, LV_ALIGN_CENTER, 0, -50);
-    lv_obj_set_style_radius(btn_bright, 10, 0);
-    lv_obj_set_style_bg_color(btn_bright, lv_color_hex(0x1E293B), 0);
-    lv_obj_add_event_cb(btn_bright, bright_cycle_cb, LV_EVENT_CLICKED, NULL);
-    cfg_bright_lbl = lv_label_create(btn_bright);
+    cfg_bright_lbl = lv_label_create(scr_settings);
     lv_label_set_text(cfg_bright_lbl, "Bright: 100%");
+    lv_obj_set_style_text_color(cfg_bright_lbl, lv_color_hex(0xF8FAFC), 0);
     lv_obj_set_style_text_font(cfg_bright_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_center(cfg_bright_lbl);
+    lv_obj_align(cfg_bright_lbl, LV_ALIGN_CENTER, 0, -74);
+
+    cfg_bright_sl = lv_slider_create(scr_settings);
+    lv_obj_set_size(cfg_bright_sl, 132, 10);
+    lv_obj_align(cfg_bright_sl, LV_ALIGN_CENTER, 0, -58);
+    lv_slider_set_range(cfg_bright_sl, 10, 100);
+    lv_slider_set_value(cfg_bright_sl, cfg_bright, LV_ANIM_OFF);
+    lv_obj_clear_flag(cfg_bright_sl, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_event_cb(cfg_bright_sl, bright_slider_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_add_event_cb(cfg_bright_sl, bright_slider_cb, LV_EVENT_RELEASED, NULL);
 
     lv_obj_t *btn_vdn = lv_btn_create(scr_settings);
-    lv_obj_set_size(btn_vdn, 34, 26);
-    lv_obj_align(btn_vdn, LV_ALIGN_CENTER, -52, -16);
+    lv_obj_set_size(btn_vdn, 34, 24);
+    lv_obj_align(btn_vdn, LV_ALIGN_CENTER, -52, -34);
     lv_obj_set_style_bg_color(btn_vdn, lv_color_hex(0x334155), 0);
     lv_obj_add_event_cb(btn_vdn, vol_down_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l_dn = lv_label_create(btn_vdn);
@@ -663,11 +784,11 @@ static void build_settings_screen(void)
     lv_label_set_text(cfg_vol_lbl, "Vol:75%");
     lv_obj_set_style_text_color(cfg_vol_lbl, lv_color_hex(0xF8FAFC), 0);
     lv_obj_set_style_text_font(cfg_vol_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_align(cfg_vol_lbl, LV_ALIGN_CENTER, 0, -16);
+    lv_obj_align(cfg_vol_lbl, LV_ALIGN_CENTER, 0, -34);
 
     lv_obj_t *btn_vup = lv_btn_create(scr_settings);
-    lv_obj_set_size(btn_vup, 34, 26);
-    lv_obj_align(btn_vup, LV_ALIGN_CENTER, 52, -16);
+    lv_obj_set_size(btn_vup, 34, 24);
+    lv_obj_align(btn_vup, LV_ALIGN_CENTER, 52, -34);
     lv_obj_set_style_bg_color(btn_vup, lv_color_hex(0x334155), 0);
     lv_obj_add_event_cb(btn_vup, vol_up_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *l_up = lv_label_create(btn_vup);
@@ -675,8 +796,8 @@ static void build_settings_screen(void)
     lv_obj_center(l_up);
 
     lv_obj_t *btn_mic = lv_btn_create(scr_settings);
-    lv_obj_set_size(btn_mic, 138, 26);
-    lv_obj_align(btn_mic, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_set_size(btn_mic, 138, 24);
+    lv_obj_align(btn_mic, LV_ALIGN_CENTER, 0, -6);
     lv_obj_set_style_radius(btn_mic, 10, 0);
     lv_obj_set_style_bg_color(btn_mic, lv_color_hex(0x0284C7), 0);
     lv_obj_add_event_cb(btn_mic, mic_mode_cb, LV_EVENT_CLICKED, NULL);
@@ -686,8 +807,8 @@ static void build_settings_screen(void)
     lv_obj_center(cfg_mic_lbl);
 
     lv_obj_t *btn_rot = lv_btn_create(scr_settings);
-    lv_obj_set_size(btn_rot, 138, 26);
-    lv_obj_align(btn_rot, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_set_size(btn_rot, 138, 24);
+    lv_obj_align(btn_rot, LV_ALIGN_CENTER, 0, 22);
     lv_obj_set_style_radius(btn_rot, 10, 0);
     lv_obj_set_style_bg_color(btn_rot, lv_color_hex(0x4F46E5), 0);
     lv_obj_add_event_cb(btn_rot, rot_mode_cb, LV_EVENT_CLICKED, NULL);
@@ -696,15 +817,26 @@ static void build_settings_screen(void)
     lv_obj_set_style_text_font(cfg_rot_lbl, &lv_font_montserrat_12, 0);
     lv_obj_center(cfg_rot_lbl);
 
+    lv_obj_t *btn_sleep = lv_btn_create(scr_settings);
+    lv_obj_set_size(btn_sleep, 138, 24);
+    lv_obj_align(btn_sleep, LV_ALIGN_CENTER, 0, 50);
+    lv_obj_set_style_radius(btn_sleep, 10, 0);
+    lv_obj_set_style_bg_color(btn_sleep, lv_color_hex(0x1E293B), 0);
+    lv_obj_add_event_cb(btn_sleep, sleep_mode_cb, LV_EVENT_CLICKED, NULL);
+    cfg_sleep_lbl = lv_label_create(btn_sleep);
+    lv_label_set_text(cfg_sleep_lbl, "Sleep: 2m");
+    lv_obj_set_style_text_font(cfg_sleep_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_center(cfg_sleep_lbl);
+
     lv_obj_t *ble_lbl = lv_label_create(scr_settings);
     lv_label_set_text(ble_lbl, "BLE");
     lv_obj_set_style_text_color(ble_lbl, lv_color_hex(0xCBD5E1), 0);
     lv_obj_set_style_text_font(ble_lbl, &lv_font_montserrat_12, 0);
-    lv_obj_align(ble_lbl, LV_ALIGN_CENTER, -28, 82);
+    lv_obj_align(ble_lbl, LV_ALIGN_CENTER, -28, 80);
 
     cfg_ble_sw = lv_switch_create(scr_settings);
     lv_obj_set_size(cfg_ble_sw, 44, 22);
-    lv_obj_align(cfg_ble_sw, LV_ALIGN_CENTER, 22, 82);
+    lv_obj_align(cfg_ble_sw, LV_ALIGN_CENTER, 22, 80);
     lv_obj_add_state(cfg_ble_sw, LV_STATE_CHECKED);
     lv_obj_add_event_cb(cfg_ble_sw, ble_switch_cb, LV_EVENT_VALUE_CHANGED, NULL);
 }
@@ -745,23 +877,23 @@ static void build_debug_screen(void)
     lv_label_set_text(dbg_sys_lbl, "Rot:180 deg");
     lv_obj_align(dbg_sys_lbl, LV_ALIGN_TOP_MID, 0, 152);
 
-    lv_obj_t *btn_ping = lv_btn_create(scr_debug);
-    lv_obj_set_size(btn_ping, 62, 26);
-    lv_obj_align(btn_ping, LV_ALIGN_BOTTOM_MID, -36, -28);
-    lv_obj_set_style_bg_color(btn_ping, lv_color_hex(0x2563EB), 0);
-    lv_obj_add_event_cb(btn_ping, dbg_ping_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *lp = lv_label_create(btn_ping);
-    lv_label_set_text(lp, "PING");
+    lv_obj_t *btn_test_call = lv_btn_create(scr_debug);
+    lv_obj_set_size(btn_test_call, 74, 26);
+    lv_obj_align(btn_test_call, LV_ALIGN_BOTTOM_MID, -40, -28);
+    lv_obj_set_style_bg_color(btn_test_call, lv_color_hex(0x2563EB), 0);
+    lv_obj_add_event_cb(btn_test_call, dbg_test_call_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lp = lv_label_create(btn_test_call);
+    lv_label_set_text(lp, "Test Call");
     lv_obj_set_style_text_font(lp, &lv_font_montserrat_12, 0);
     lv_obj_center(lp);
 
     lv_obj_t *btn_ble = lv_btn_create(scr_debug);
-    lv_obj_set_size(btn_ble, 62, 26);
-    lv_obj_align(btn_ble, LV_ALIGN_BOTTOM_MID, 36, -28);
+    lv_obj_set_size(btn_ble, 74, 26);
+    lv_obj_align(btn_ble, LV_ALIGN_BOTTOM_MID, 40, -28);
     lv_obj_set_style_bg_color(btn_ble, lv_color_hex(0x0D9488), 0);
     lv_obj_add_event_cb(btn_ble, dbg_ble_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lb = lv_label_create(btn_ble);
-    lv_label_set_text(lb, "BLE");
+    lv_label_set_text(lb, "BLE Refresh");
     lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
     lv_obj_center(lb);
 }
@@ -780,8 +912,20 @@ void ui_screens_init(const ui_callbacks_t *cbs)
     build_settings_screen();
     build_debug_screen();
 
+    wake_shield = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(wake_shield, 240, 240);
+    lv_obj_set_pos(wake_shield, 0, 0);
+    lv_obj_set_style_bg_opa(wake_shield, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(wake_shield, 0, 0);
+    lv_obj_clear_flag(wake_shield, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(wake_shield, LV_OBJ_FLAG_GESTURE_BUBBLE);
+    lv_obj_add_flag(wake_shield, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(wake_shield, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(wake_shield, wake_shield_cb, LV_EVENT_PRESSED, NULL);
+
     current_screen_idx = 0;
     apply_hardware_orientation(DISPLAY_ORIENTATION_ROTATED_180);
+    apply_backlight_pct(cfg_bright);
     lv_scr_load(scr_face);
 }
 
@@ -827,6 +971,19 @@ void ui_screens_tick_anim(void)
         static const lv_area_t face_dirty = { .x1 = 35, .y1 = 44, .x2 = 205, .y2 = 166 };
         lv_obj_invalidate_area(face_canvas, &face_dirty);
     }
+
+    /* Idle sleep dimming */
+    int timeout_s = sleep_options_s[cfg_sleep_idx];
+    if (timeout_s > 0 && !display_dimmed) {
+        uint32_t inactive_ms = lv_disp_get_inactive_time(NULL);
+        if (inactive_ms >= (uint32_t)timeout_s * 1000U) {
+            display_dimmed = true;
+            apply_backlight_pct(0);
+            if (wake_shield) {
+                lv_obj_clear_flag(wake_shield, LV_OBJ_FLAG_HIDDEN);
+            }
+        }
+    }
 }
 
 void ui_screens_update_telemetry(void)
@@ -862,7 +1019,7 @@ void ui_screens_update_telemetry(void)
         lv_label_set_text(dbg_imu_lbl, buf);
 
         char mac[18] = {0};
-        char name[20] = {0};
+        char name[32] = {0};
         int8_t rssi = 0;
         int cnt = ble_scanner_get_count();
         if (ble_scanner_get_strongest(mac, sizeof(mac), name, sizeof(name), &rssi)) {
@@ -876,8 +1033,12 @@ void ui_screens_update_telemetry(void)
         gpio_agent_get_status_str(gbuf, sizeof(gbuf));
         lv_label_set_text(dbg_gpio_lbl, gbuf);
 
-        snprintf(buf, sizeof(buf), "%dmV | %ddeg | %llds",
-                 vbat_mv, ui_screens_get_angle_deg(), k_uptime_get() / 1000);
+        struct sys_memory_stats heap_stats = {0};
+        sys_heap_runtime_stats_get(&_system_heap.heap, &heap_stats);
+        snprintf(buf, sizeof(buf), "%dmV|%ddeg|%uKB|%llds",
+                 vbat_mv, ui_screens_get_angle_deg(),
+                 (unsigned)(heap_stats.free_bytes / 1024U),
+                 k_uptime_get() / 1000);
         lv_label_set_text(dbg_sys_lbl, buf);
     }
 }
@@ -890,6 +1051,9 @@ int ui_screens_get_angle_deg(void)
 void ui_set_emotion(face_emotion_t emo)
 {
     g_emotion = emo;
+    if (emo != FACE_SLEEPING) {
+        ui_wake_display();
+    }
 }
 
 void ui_set_emotion_str(const char *emo_str)
@@ -904,12 +1068,17 @@ void ui_set_emotion_str(const char *emo_str)
     else if (strcasecmp(emo_str, "SLEEPING") == 0) g_emotion = FACE_SLEEPING;
     else if (strcasecmp(emo_str, "ALERT") == 0) g_emotion = FACE_ALERT;
     else g_emotion = FACE_IDLE;
+
+    if (g_emotion != FACE_SLEEPING) {
+        ui_wake_display();
+    }
 }
 
 void ui_set_subtitle(const char *text)
 {
     if (!text) return;
     lv_label_set_text(sub_lbl, text);
+    ui_wake_display();
 }
 
 void ui_set_mouth(int value)
@@ -920,6 +1089,9 @@ void ui_set_mouth(int value)
     if (value > 0 && g_emotion != FACE_SPEAKING) {
         g_emotion = FACE_SPEAKING;
     }
+    if (value > 0) {
+        ui_wake_display();
+    }
 }
 
 void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const char *bt_spk)
@@ -929,12 +1101,15 @@ void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const c
         link_quixi[sizeof(link_quixi) - 1] = '\0';
         lv_label_set_text(status_lbl, link_quixi);
 
+        lv_color_t col = lv_color_hex(0xF59E0B);
         if (strcasecmp(link_quixi, "ONLINE") == 0 || strcasecmp(link_quixi, "OK") == 0) {
-            lv_obj_set_style_bg_color(status_dot, lv_color_hex(0x22C55E), 0);
+            col = lv_color_hex(0x22C55E);
         } else if (strcasecmp(link_quixi, "OFFLINE") == 0) {
-            lv_obj_set_style_bg_color(status_dot, lv_color_hex(0xEF4444), 0);
-        } else {
-            lv_obj_set_style_bg_color(status_dot, lv_color_hex(0xF59E0B), 0);
+            col = lv_color_hex(0xEF4444);
+        }
+        lv_obj_set_style_bg_color(status_dot, col, 0);
+        if (status_arc) {
+            lv_obj_set_style_arc_color(status_arc, col, LV_PART_INDICATOR);
         }
     }
     if (voip && voip[0]) {
@@ -945,8 +1120,8 @@ void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const c
         strncpy(link_bt, bt_spk, sizeof(link_bt) - 1);
         link_bt[sizeof(link_bt) - 1] = '\0';
     }
-    if (rtt_ms >= 0) {
-        link_rtt_ms = rtt_ms;
+    if (rtt_ms != INT_MIN) {
+        link_rtt_ms = (rtt_ms >= 0) ? rtt_ms : -1;
     }
 }
 
@@ -955,5 +1130,80 @@ void ui_set_mic_active(bool active)
     mic_active = active;
     if (active) {
         g_emotion = FACE_LISTENING;
+        ui_wake_display();
+    }
+}
+
+void ui_set_brightness(int pct)
+{
+    if (pct < 10) pct = 10;
+    if (pct > 100) pct = 100;
+    cfg_bright = pct;
+    if (cfg_bright_sl) {
+        lv_slider_set_value(cfg_bright_sl, cfg_bright, LV_ANIM_OFF);
+    }
+    if (cfg_bright_lbl) {
+        char buf[24];
+        snprintf(buf, sizeof(buf), "Bright: %d%%", cfg_bright);
+        lv_label_set_text(cfg_bright_lbl, buf);
+    }
+    display_dimmed = false;
+    if (wake_shield) {
+        lv_obj_add_flag(wake_shield, LV_OBJ_FLAG_HIDDEN);
+    }
+    lv_disp_trig_activity(NULL);
+    apply_backlight_pct(cfg_bright);
+}
+
+int ui_get_brightness(void)
+{
+    return cfg_bright;
+}
+
+void ui_set_volume(int vol)
+{
+    if (vol < 0) vol = 0;
+    if (vol > 100) vol = 100;
+    cfg_vol = vol;
+    if (cfg_vol_lbl) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), "Vol:%d%%", cfg_vol);
+        lv_label_set_text(cfg_vol_lbl, buf);
+    }
+}
+
+void ui_set_mic_mode_str(const char *mode)
+{
+    if (!mode) return;
+    if (strcasecmp(mode, "ptt") == 0) cfg_mic_mode = 1;
+    else if (strcasecmp(mode, "duplex") == 0) cfg_mic_mode = 2;
+    else cfg_mic_mode = 0;
+
+    if (cfg_mic_lbl) {
+        lv_label_set_text(cfg_mic_lbl, mic_mode_label_from_idx(cfg_mic_mode));
+    }
+}
+
+void ui_set_ble_enabled_ui(bool enabled)
+{
+    cfg_ble_en = enabled;
+    ble_scanner_set_enabled(enabled);
+    if (cfg_ble_sw) {
+        if (enabled) {
+            lv_obj_add_state(cfg_ble_sw, LV_STATE_CHECKED);
+        } else {
+            lv_obj_clear_state(cfg_ble_sw, LV_STATE_CHECKED);
+        }
+    }
+}
+
+void ui_set_sleep_timeout_s(int sleep_s)
+{
+    if (sleep_s <= 0) cfg_sleep_idx = 2;
+    else if (sleep_s <= 30) cfg_sleep_idx = 0;
+    else cfg_sleep_idx = 1;
+
+    if (cfg_sleep_lbl) {
+        lv_label_set_text(cfg_sleep_lbl, sleep_label_from_idx(cfg_sleep_idx));
     }
 }

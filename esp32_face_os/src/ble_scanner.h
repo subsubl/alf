@@ -5,12 +5,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define BLE_MAX_DEVICES 16
+#define BLE_MAX_DEVICES 32
 
 typedef struct {
     bool active;
+    uint8_t addr_type;
     char mac[18];
-    char name[20];
+    char name[32];
     int8_t rssi;
     int64_t last_seen_ms;
 } ble_device_entry_t;
@@ -45,8 +46,13 @@ bool ble_scanner_get_strongest(char *mac_out, size_t mac_len,
                                int8_t *rssi_out);
 
 /**
- * @brief Format active BLE devices as a JSON array into buf: [{"mac":"...","name":"...","rssi":-50},...]
+ * @brief Format active BLE devices as a JSON array into buf: [{"mac":"...","type":0,"name":"...","rssi":-50},...]
  */
 int ble_scanner_format_json(char *buf, size_t len);
+
+/**
+ * @brief Format active BLE devices as a JSON array and output exact serialized count under one lock.
+ */
+int ble_scanner_format_json_ex(char *buf, size_t len, int *cnt_out);
 
 #endif /* BLE_SCANNER_H */

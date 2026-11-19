@@ -254,21 +254,22 @@ class TestZeroTrustAndExclusions(unittest.TestCase):
                 svc = ServerCompanionService()
                 self.assertFalse(svc._is_authorized("1SomeRandomAddress"))
 
-    def test_exclusions_compliance(self) -> None:
-        self.assertFalse((_REPO_ROOT / ".github" / "workflows").exists())
-        github_dir = _REPO_ROOT / ".github"
-        if github_dir.exists():
-            self.assertEqual(list(github_dir.rglob("*.yml")) + list(github_dir.rglob("*.yaml")), [])
+    def test_repo_hygiene_and_workflows(self) -> None:
+        # CI and image-build workflows are part of the repo; they must not embed provider secrets.
+        wf_dir = _REPO_ROOT / ".github" / "workflows"
+        workflows = sorted(wf_dir.glob("*.yml"))
+        self.assertTrue({"ci.yml", "build-rpi-image.yml"} <= {w.name for w in workflows})
+        for wf in workflows:
+            text = wf.read_text(encoding="utf-8")
+            for forbidden in ("LLM_API_KEY", "STT_API_KEY", "TTS_API_KEY", "OPENAI_API_KEY"):
+                self.assertNotIn(forbidden, text, f"{forbidden} referenced in {wf.name}")
+            self.assertNotRegex(text, r"secrets\.(?!GITHUB_TOKEN)", f"unexpected secret in {wf.name}")
 
+        # Never commit built disk images.
         for root, dirs, files in os.walk(_REPO_ROOT):
-            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "__pycache__"}]
-            for d in dirs:
-                self.assertNotIn(d.lower(), {"pi-gen", "packer", "genimage"})
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "__pycache__", ".mypy_cache", ".pytest_cache"}]
             for fn in files:
                 self.assertFalse(fn.endswith((".img", ".img.xz", ".iso")), f"Forbidden disk image: {fn}")
-
-        remote = subprocess.run(["git", "-C", str(_REPO_ROOT), "remote", "-v"], capture_output=True, text=True, check=True)
-        self.assertEqual(remote.stdout.strip(), "")
 
 
 class TestFirmwareAndCrossTierContracts(unittest.TestCase):

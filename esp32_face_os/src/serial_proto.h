@@ -16,4 +16,9 @@ void serial_send_json(const char *json_line);
  */
 void serial_proto_poll(void);
 
+/**
+ * @brief Format and transmit an asynchronous BLE device list event.
+ */
+void serial_send_ble_evt(void);
+
 #endif /* SERIAL_PROTO_H */

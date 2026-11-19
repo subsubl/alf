@@ -1,133 +1,172 @@
-# Connected AI Companion (Tamagci)
+<div align="center">
 
-A 3-tier embodied AI companion system built around a **Waveshare ESP32-S3-Touch-LCD-1.28-B** face & sensor co-processor, tethered via USB to a **Raspberry Pi Zero 2 W** hub with Bluetooth speaker/microphone, communicating over the post-quantum encrypted **Ixian P2P network via QuIXI** (`ixian-platform/QuIXI`) using the **`Spixi/VoIP/VoIPManager.cs`** audio streaming protocol to a remote **AI Server**.
+# Alf — Connected AI Companion
 
-> **Zero-Trust Edge Security Model:** All OpenAI-compatible API keys (`LLM_API_KEY`, `STT_API_KEY`, `TTS_API_KEY`) live **exclusively** on Tier 3 in `server_agent/.env` (`chmod 600`). Tier 1 (`esp32_face_os/`) and Tier 2 (`pi_hub/`) store zero API keys or provider credentials.
+**An embodied, voice-driven AI companion: a round-LCD face on an ESP32-S3, a Raspberry Pi Zero 2 W hub, and a remote AI server — linked over the post-quantum Ixian P2P network.**
 
----
+[![CI](https://github.com/subsubl/alf/actions/workflows/ci.yml/badge.svg)](https://github.com/subsubl/alf/actions/workflows/ci.yml)
+[![Pi image](https://github.com/subsubl/alf/actions/workflows/build-rpi-image.yml/badge.svg)](https://github.com/subsubl/alf/actions/workflows/build-rpi-image.yml)
+![Zephyr](https://img.shields.io/badge/Zephyr-3.7%20LTS-5b2d90)
+![LVGL](https://img.shields.io/badge/LVGL-8.4-0b7285)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776ab)
+![Security](https://img.shields.io/badge/API%20keys%20on%20edge-zero-2f9e44)
 
-## Architecture
-
-1. **Tier 1 — `esp32_face_os/` (Zephyr RTOS v3.7.0 LTS + LVGL v8.4)**
-   * **Animated Companion Face & 4-Step Orientation**: 240×240 round GC9A01 display with 4-step hardware MADCTL rotation (`0° / 90° / 180° / 270°` with IMU hysteresis + CST816S touch coordinate rotation), 9 procedural emotions (`IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `HAPPY`, `SAD`, `SURPRISED`, `SLEEPING`, `ALERT`), 20Hz viseme mouth lip-sync, and 2–3 line rolling live subtitles.
-   * **3-Screen Carousel**: Touch L/R swipe or `<`/`>` navigation between:
-     * **Face**: Tap center canvas for PTT (`ptt_toggle`) or barge-in (`stop_speech` while speaking).
-     * **Settings**: GPIO 2 PWM backlight brightness (`&ledc0` bound exclusively to GPIO 2), BT volume, Mic mode (`vad` / `ptt` / `duplex`), Rotation mode (`Auto 4-Way` / `Auto Flip 0-180` / `Lock 180`), BLE observer toggle, and Sleep Timeout (`30s` / `2m` / `Never`).
-     * **Debug/Telemetry**: Live `Q/V/BT/RTT` link status, IMU telemetry, BLE device count, GPIO state, Vbat (`GPIO 1` ADC), angle/uptime, `Free Heap`, plus `Test Call` and `BLE Refresh` buttons.
-   * **QMI8658 6-Axis IMU (`50Hz` Thread)**: Dedicated 50Hz sensor thread on I2C1 (`0x6B`/`0x6A`, GPIO 6/7) detecting `shake`, `tilt`, `pickup`, and `double_tap` gestures.
-   * **BLE Passive Observer**: 32-entry table tracking nearby BLE devices (`mac`, `addr_type`, `rssi`, sanitized `name`) with 30s stale pruning.
-   * **Dynamic Agent GPIO & Battery ADC**: Allows the remote AI Agent to configure/read/write allowlisted header pins (`15, 16, 17, 18, 21, 33, 34, 35, 36, 37`) and read battery voltage on `GPIO 1` ADC (`* 3` mV). Protected internal pins (`0..14, 43, 44`) fail safely with `-EACCES`, and negative pins (`pin < 0`) return `-EINVAL`.
-   * **Clean UART0 NDJSON Link**: Interrupt-driven UART0 (`&uart0`) at **`921600` baud** 8N1 with boot banner, UART console, and UART logging suppressed in `prj.conf` so logs never interleave with NDJSON frames.
-
-2. **Tier 2 — `pi_hub/` (Raspberry Pi Zero 2 W)**
-   * Connects via USB serial (`/dev/ttyACM0` @ `921600` baud NDJSON) to the ESP32-S3 (`esp_serial_bridge.py`).
-   * Captures BlueZ/PipeWire Bluetooth microphone audio (`vad`, `ptt`, or `duplex` mode) with touch/voice barge-in (`stop_speech`) and streams frames via `SpixiVoIPSessionManager` (`spixi.voip`) over **QuIXI** (REST `:8001` + Mosquitto MQTT `:1883`).
-   * Plays incoming TTS audio frames on the Bluetooth speaker while pacing 20Hz viseme mouth frames and `ChatStream` subtitles to the ESP32-S3 with configurable Bluetooth latency compensation (`bt_latency_ms`).
-   * Executes `com.tamagci.agent` hardware RPCs (`tool_call` and `tool_batch`) against the ESP32-S3 and reports `tool_res` / `hw_event` upstream.
-
-3. **Tier 3 — `server_agent/` (Remote AI Server — Sole API Key Vault)**
-   * Enforces **fail-closed** `PI_IXIAN_ADDRESS` authorization (`ALLOW_UNAUTHENTICATED_DEV=false` by default) and auto-accepts authorized `spixi.voip` sessions.
-   * Holds `LLM_API_KEY`, `STT_API_KEY`, and `TTS_API_KEY` in `server_agent/.env` (`chmod 600`).
-   * Runs OpenAI-compatible STT (`/v1/audio/transcriptions`), Chat Completions LLM with 6 dynamic hardware tools and tool-call-safe history trimming (`/v1/chat/completions`), and TTS (`/v1/audio/speech`), returning synced `ChatStream` text, 20Hz viseme envelopes (`tts_meta` / `tts_end`), and `spixi.voip` audio frames.
-
-4. **Shared Protocol Library — `common_ixian/`**
-   * Exact Python port of `AppDataMessage` binary serialization (`common_ixian/spixi_voip.py`, importable standalone) and `Spixi/VoIP/VoIPManager.cs` session lifecycle (`SpixiMessageCode` `21, 22, 28, 29, 30, 31, 45, 53`, including `30` `APP_REQUEST_ERROR`), paired with async `QuIXIClient` (`common_ixian/quixi_client.py`) for REST (`:8001`) and MQTT (`:1883`).
+</div>
 
 ---
 
-## Repository Layout
+## Overview
 
-```text
-Tamagci/
-├── esp32_face_os/          # Tier 1 Zephyr v3.7.0 LTS + LVGL v8.4 firmware + flash.bat
-├── common_ixian/           # Shared AppDataMessage codec, SpixiVoIPSessionManager, QuIXIClient
-├── pi_hub/                 # Tier 2 Raspberry Pi Zero 2 W asyncio hub + config.yaml
-├── server_agent/           # Tier 3 Remote AI Server + .env.example (API key vault)
-├── deploy/                 # Step 5 setup scripts, ixian.cfg templates, systemd units, DEPLOYMENT.md
-│   ├── DEPLOYMENT.md       # Step-by-step zero-trust Pi + Server deployment guide
-│   ├── setup_pi.sh         # Pi Zero 2 W local setup script (zero API keys)
-│   ├── setup_server.sh     # Remote server setup script (.env chmod 600)
-│   ├── ixian.cfg.pi.template
-│   ├── ixian.cfg.server.template
-│   └── systemd/            # quixi-pi, tamagci-pi-hub, quixi-server, tamagci-server-agent
-├── tools/                  # verify_esp32_serial.py, pc_companion_tester.py, test_ixian_voip.py
-└── tests/                  # Offline unit, security/contract, and opaque-box E2E test suites
+Alf is a three-tier companion architecture. The face and sensors live on a tiny edge device; the "brain" runs remotely; nothing in between ever sees an API key.
+
+| Tier | Hardware / Host | Code | Role |
+|------|-----------------|------|------|
+| **1 — Face & sensors** | Waveshare ESP32-S3-Touch-LCD-1.28-B (Zephyr RTOS + LVGL) | [`esp32_face_os/`](esp32_face_os) | Animated face, live subtitles, touch, IMU gestures, BLE radar, agent-controlled GPIO |
+| **2 — Hub** | Raspberry Pi Zero 2 W + Bluetooth speaker/mic | [`pi_hub/`](pi_hub) | USB bridge to Tier 1, audio capture/playback, lip-sync pacing, QuIXI/Spixi VoIP client |
+| **3 — AI server** | Any Linux host | [`server_agent/`](server_agent) | STT → LLM (with hardware tools) → TTS routing; the **only** place API keys exist |
+| **Shared** | — | [`common_ixian/`](common_ixian) | Python port of Spixi `AppDataMessage` / `VoIPManager` + async QuIXI REST/MQTT client |
+
+```mermaid
+flowchart LR
+    subgraph T1["Tier 1 · ESP32-S3"]
+        UI["LVGL face · subtitles · settings · debug"]
+        SENS["Touch · IMU · BLE · GPIO/ADC"]
+    end
+    subgraph T2["Tier 2 · Raspberry Pi Zero 2 W"]
+        HUB["pi_hub"]
+        BT["Bluetooth speaker + mic"]
+        QP["QuIXI + Mosquitto"]
+    end
+    subgraph T3["Tier 3 · AI server"]
+        QS["QuIXI + Mosquitto"]
+        AG["server_agent"]
+        AI["OpenAI-compatible STT / LLM / TTS"]
+    end
+    T1 <-- "USB · NDJSON · 921600 baud" --> HUB
+    HUB <--> BT
+    HUB <--> QP
+    QP <-- "Ixian P2P · Spixi VoIP" --> QS
+    QS <--> AG
+    AG <-- "API keys (.env, chmod 600)" --> AI
 ```
 
----
+> **Zero-trust edge:** `LLM_API_KEY`, `STT_API_KEY` and `TTS_API_KEY` live **only** in `server_agent/.env` on Tier 3. Tiers 1 and 2 hold no provider credentials, and the Pi image build bakes in no secrets or wallet passwords. The server fails closed: unless `PI_IXIAN_ADDRESS` is set it rejects calls (`ALLOW_UNAUTHENTICATED_DEV=false`).
 
-## Quick Start & Hardware Tools
+## Features
 
-### 1. ESP32-S3 Firmware (`esp32_face_os/`)
-On Windows with Zephyr v3.7.0 LTS (`C:\zephyrproject` and `C:\zephyr-sdk-0.16.8`, board `esp32s3_touch_lcd_1_28/esp32s3/procpu`):
+**Tier 1 — `esp32_face_os`**
+- 240×240 GC9A01 round display with a procedural vector face: 9 emotions (`IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `HAPPY`, `SAD`, `SURPRISED`, `SLEEPING`, `ALERT`), blinking, gaze, 20 Hz viseme lip-sync and rolling live subtitles.
+- Fast 4-step hardware rotation (0°/90°/180°/270° via panel MADCTL) driven by the IMU, with touch coordinates rotated to match.
+- Three screens (swipe or `<`/`>`): **Face** (tap = push-to-talk / barge-in), **Settings** (brightness, volume, mic mode `vad`/`ptt`/`duplex`, rotation mode, BLE toggle, sleep timeout), **Debug** (link status, IMU, BLE, GPIO, battery, heap).
+- QMI8658 IMU on a dedicated 50 Hz thread: `shake`, `tilt`, `pickup`, `double_tap`.
+- BLE passive observer (32 entries, stale pruning).
+- Agent-controlled GPIO on allow-listed header pins (`15, 16, 17, 18, 21, 33, 34, 35, 36, 37`) plus battery ADC on `GPIO 1`; protected pins return `-EACCES`, bad arguments `-EINVAL`.
+- Clean NDJSON-over-USB protocol at 921600 baud with console/log output disabled so frames never interleave.
+
+**Tier 2 — `pi_hub`**
+- Asyncio orchestrator bridging the ESP32-S3 serial link and the Spixi VoIP session.
+- Mic modes `vad`, `ptt`, `duplex`; touch and voice barge-in; Bluetooth latency compensation (`bt_latency_ms`).
+- Executes `tool_call` / `tool_batch` hardware RPCs from the agent against Tier 1.
+
+**Tier 3 — `server_agent`**
+- OpenAI-compatible STT (`/v1/audio/transcriptions`), chat with six dynamic hardware tools (`/v1/chat/completions`) and tool-call-safe history trimming, and TTS (`/v1/audio/speech`).
+- Returns synced `ChatStream` text, 20 Hz viseme envelopes and audio frames over Spixi VoIP.
+
+## Repository layout
+
+```text
+.
+├── esp32_face_os/     Zephyr 3.7 LTS + LVGL 8.4 firmware (Tier 1)
+├── pi_hub/            Raspberry Pi hub (Tier 2)
+├── server_agent/      AI server + .env.example (Tier 3)
+├── common_ixian/      Spixi AppDataMessage/VoIP codec + QuIXI client
+├── deploy/            setup scripts, ixian.cfg templates, systemd units, image builder
+├── tools/             hardware verification and interactive test tools
+├── tests/             offline unit, security and E2E suites
+└── .github/workflows/ CI and Raspberry Pi image build
+```
+
+## Getting started
+
+### 1 · Flash the ESP32-S3 face (Windows, Zephyr 3.7 LTS)
+
+Prerequisites: Zephyr workspace at `C:\zephyrproject` (keep the path short — Windows long paths break the build), Zephyr SDK 0.16.8 with the `xtensa-espressif_esp32s3_zephyr-elf` toolchain, and `west blobs fetch hal_espressif`.
+
 ```cmd
 esp32_face_os\flash.bat
 ```
-For non-interactive / CI invocations (skips `pause` prompts):
-```cmd
-esp32_face_os\flash.bat --no-pause
-```
 
-Verify live ESP32-S3 hardware streams over USB (`COM3` @ `921600` baud):
+CI builds the same firmware on every push and uploads `zephyr.bin` as an artifact.
+
+Verify every serial stream against real hardware:
+
 ```powershell
-C:\zephyrproject\.venv\Scripts\python.exe tools\verify_esp32_serial.py COM3 --baud 921600
-C:\zephyrproject\.venv\Scripts\python.exe tools\pc_companion_tester.py COM3 --baud 921600
+python tools\verify_esp32_serial.py COM3 --baud 921600
+python tools\pc_companion_tester.py COM3 --baud 921600   # interactive: speak, emo, imu, ble, gcfg/gset/gread, bright, dbg, ping
 ```
-(`pc_companion_tester.py` provides interactive commands: `speak`, `emo <NAME>`, `imu`, `ble`, `gpio <pin> <0|1>`, `gcfg <pin> <dir> [pull] [val]`, `gset <pin> <0|1>`, `gread <pin>`, `bright <10..100>`, `dbg <quixi> <voip> <ms> <bt>`, `ping`, `quit`.)
 
-### 2. QuIXI P2P Configuration & Pairing
-Both the Pi Zero 2 W and Remote AI Server run local Mosquitto (`127.0.0.1:1883`) and QuIXI (`http://127.0.0.1:8001/`). Starter templates are provided in `deploy/ixian.cfg.pi.template` and `deploy/ixian.cfg.server.template`:
+### 2 · Deploy the server (Tier 3)
+
+```bash
+deploy/setup_server.sh
+cp server_agent/.env.example server_agent/.env && chmod 600 server_agent/.env
+# set LLM/STT/TTS keys and PI_IXIAN_ADDRESS; keep ALLOW_UNAUTHENTICATED_DEV=false
+sudo systemctl enable --now quixi-server tamagci-server-agent
+```
+
+### 3 · Set up the Pi hub (Tier 2)
+
+**Option A — prebuilt image.** Download `tamagci-pi-zero2w-*.img.xz` from the [Releases](https://github.com/subsubl/alf/releases) page (or the artifact of a [Pi image build](https://github.com/subsubl/alf/actions/workflows/build-rpi-image.yml) run), verify the `.sha256`, and write it with Raspberry Pi Imager ("Use custom") — set Wi-Fi, user and SSH in the Imager's customisation dialog. The image is Raspberry Pi OS Lite (arm64) with Mosquitto, BlueZ/PipeWire, a self-contained linux-arm64 QuIXI build and the hub pre-installed. Services are installed but **not** enabled: finish provisioning on first boot (the MOTD lists the steps) — set the QuIXI wallet password and `server_ixian_address`, then `sudo systemctl enable --now quixi-pi tamagci-pi-hub`.
+
+**Option B — existing Raspberry Pi OS:**
+
+```bash
+deploy/setup_pi.sh
+```
+
+Both paths end with QuIXI contact pairing (`/addContact`, `/acceptContact`) between Pi and server — see **[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)** for the full zero-trust walkthrough.
+
+### QuIXI configuration
+
+Templates live in [`deploy/ixian.cfg.pi.template`](deploy/ixian.cfg.pi.template) and [`deploy/ixian.cfg.server.template`](deploy/ixian.cfg.server.template):
+
 ```ini
 apiPort = 8001
-apiBinds = http://127.0.0.1:8001/
 mqDriver = mqtt
 mqHost = 127.0.0.1
 mqPort = 1883
-networkType = mainnet
-# networkType = testnet
-walletPassword = REPLACE_WITH_STRONG_WALLET_PASSWORD
-```
-Pair the Pi and Server wallets mutually via QuIXI REST `/addContact` and `/acceptContact` (and verify via `/contacts`), then set `PI_IXIAN_ADDRESS` in `server_agent/.env` and `server_ixian_address` in `pi_hub/config.yaml`.
-
-### 3. Production / Step 5 Deployment (`deploy/`)
-Follow **[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)** for complete zero-trust deployment instructions covering:
-- `deploy/setup_server.sh` (installs `server_agent/.venv`, enforces `chmod 600` on `server_agent/.env`, stages `ixian.cfg.server.template`, installs `quixi-server.service` and `tamagci-server-agent.service`)
-- `deploy/setup_pi.sh` (installs BlueZ/PipeWire/PortAudio/Mosquitto deps, `dialout`/`audio`/`bluetooth` groups, `pi_hub/.venv`, stages `ixian.cfg.pi.template`, installs `quixi-pi.service` and `tamagci-pi-hub.service`, zero API keys)
-- QuIXI `/addContact` & `/acceptContact` pairing, `/dev/ttyACM0` @ `921600` baud, PipeWire Bluetooth audio & `bt_latency_ms`, and `systemd`/`journalctl` management.
-
-### 4. Manual Local Development Run
-**Tier 3 Remote AI Server (`server_agent/`):**
-```bash
-cd server_agent
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env && chmod 600 .env
-# Edit .env with your API keys and PI_IXIAN_ADDRESS (keep ALLOW_UNAUTHENTICATED_DEV=false)
-python main_server.py
 ```
 
-**Tier 2 Raspberry Pi Zero 2 W Hub (`pi_hub/`):**
-```bash
-cd pi_hub
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-# Edit config.yaml with serial.port (/dev/ttyACM0), serial.baudrate (921600), and server_ixian_address
-python main_hub.py
-```
+## Continuous integration
 
----
+| Workflow | Trigger | What it does |
+|----------|---------|--------------|
+| [`ci.yml`](.github/workflows/ci.yml) | push, PR, reusable | Offline test suites on Python 3.11 & 3.12, ShellCheck on deploy scripts, Zephyr firmware build with `zephyr.bin` artifact |
+| [`build-rpi-image.yml`](.github/workflows/build-rpi-image.yml) | `v*` tag, manual | Re-runs CI, builds QuIXI for linux-arm64 (.NET 10), assembles the Pi Zero 2 W image in a qemu chroot, publishes `.img.xz` + SHA-256 (as a release on tags) |
 
-## Offline Verification & Testing
+Cut an image release with `git tag v0.1.0 && git push origin v0.1.0`, or run **Build Raspberry Pi image** manually from the Actions tab.
 
-The `tests/` suite and `tools/test_ixian_voip.py` run **100% offline** using mocked ESP32-S3, QuIXI REST/MQTT, and OpenAI endpoints (no `COM3` hardware, live Raspberry Pi, live QuIXI node, or API keys required):
+## Testing
+
+All tests run offline — no ESP32 hardware, Raspberry Pi, live QuIXI node or API keys needed (mocked ESP32, QuIXI REST/MQTT and OpenAI endpoints):
 
 ```bash
-# Standard library unittest discovery across tests/
-python -m unittest discover -s tests -v
-
-# Standalone Spixi VoIP AppDataMessage & session loopback tests
+pip install -r pi_hub/requirements.txt -r server_agent/requirements.txt pytest
 python tools/test_ixian_voip.py -v
-
-# Full pytest run (using Zephyr venv pytest)
-C:\zephyrproject\.venv\Scripts\python.exe -m pytest tests tools/test_ixian_voip.py -v
+python -m pytest tests tools/test_ixian_voip.py -v
 ```
+
+Hardware-in-the-loop checks (`tools/verify_esp32_serial.py`) need a connected board and are intentionally not part of CI.
+
+## Protocol notes
+
+- **Serial (Tier 1 ↔ 2):** newline-delimited JSON, 921600 baud 8N1. Commands include `state`, `sync`, `mouth`, `dbg`, `cfg`, `gpio_cfg`, `gpio_set`, `gpio_get`, `ble_get`, `imu_get`, `ping`; the device replies with `res` and emits `evt` (touch, IMU gestures, config changes, heartbeat).
+- **Ixian (Tier 2 ↔ 3):** Spixi `AppDataMessage` framing and the `VoIPManager` call lifecycle over QuIXI's REST API (`:8001`) and MQTT (`:1883`), based on [`Spixi/VoIP/VoIPManager.cs`](https://github.com/ixian-platform/Spixi/blob/master/Spixi/VoIP/VoIPManager.cs).
+
+## Status
+
+Tier 1 is verified on hardware; Tiers 2–3 are covered by offline tests. Live Pi ↔ server QuIXI testing and the first published Pi image are the next milestones.
+
+## License
+
+No license has been chosen yet. Until one is added, all rights are reserved by the author.
