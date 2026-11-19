@@ -11,7 +11,7 @@ set -euo pipefail
 
 IMG="${1:?usage: $0 <base.img> <quixi-publish-dir> [extra-grow-MiB]}"
 QUIXI_SRC="${2:?usage: $0 <base.img> <quixi-publish-dir> [extra-grow-MiB]}"
-GROW_MIB="${3:-1536}"
+GROW_MIB="${3:-2048}"
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MNT="$(mktemp -d /tmp/tamagci-rootfs.XXXXXX)"
 SVC_USER="tamagci"
@@ -19,7 +19,7 @@ LOOP=""
 
 cleanup() {
     set +e
-    for m in dev/pts dev proc sys boot/firmware ""; do
+    for m in dev/pts dev proc sys boot/firmware boot ""; do
         mountpoint -q "${MNT}/${m}" && umount -l "${MNT}/${m}"
     done
     [[ -n "${LOOP}" ]] && losetup -d "${LOOP}"
@@ -39,7 +39,8 @@ resize2fs "${LOOP}p2"
 
 echo "==> Mounting rootfs and boot partitions"
 mount "${LOOP}p2" "${MNT}"
-mount "${LOOP}p1" "${MNT}/boot/firmware"
+mkdir -p "${MNT}/boot/firmware"
+mount "${LOOP}p1" "${MNT}/boot/firmware" || mount "${LOOP}p1" "${MNT}/boot" || true
 mount --bind /dev "${MNT}/dev"
 mount --bind /dev/pts "${MNT}/dev/pts"
 mount -t proc proc "${MNT}/proc"
@@ -54,6 +55,8 @@ echo "==> Staging Tamagci sources and QuIXI"
 mkdir -p "${MNT}/opt/tamagci" "${MNT}/opt/quixi"
 tar -C "${REPO_DIR}" \
     --exclude=.git --exclude=.github --exclude=esp32_face_os --exclude=server_agent \
+    --exclude='*.img' --exclude='*.img.xz' --exclude='*.iso' --exclude='*.sha256' \
+    --exclude='quixi*' --exclude='scratch' --exclude='build' \
     --exclude='__pycache__' --exclude='.venv' --exclude='.mypy_cache' --exclude='.pytest_cache' \
     -cf - . | tar -C "${MNT}/opt/tamagci" -xf -
 cp -a "${QUIXI_SRC}/." "${MNT}/opt/quixi/"

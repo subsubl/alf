@@ -73,18 +73,19 @@ jobs:
 
       - name: Download Raspberry Pi OS Lite (arm64)
         run: |
-          curl -fL --retry 3 -o base.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
-          xz -d base.img.xz
-          ls -lh base.img
+          mkdir -p /tmp/tamagci-img
+          curl -fL --retry 3 -o /tmp/tamagci-img/base.img.xz https://downloads.raspberrypi.com/raspios_lite_arm64_latest
+          xz -d /tmp/tamagci-img/base.img.xz
+          ls -lh /tmp/tamagci-img/base.img
 
       - name: Build image
-        run: sudo bash deploy/image/build_image.sh "$PWD/base.img" "$PWD/quixi-linux-arm64"
+        run: sudo bash deploy/image/build_image.sh "/tmp/tamagci-img/base.img" "$GITHUB_WORKSPACE/quixi-linux-arm64"
 
       - name: Name and compress
         id: pack
         run: |
           NAME="tamagci-pi-zero2w-${GITHUB_REF_NAME//\//-}-$(date -u +%Y%m%d)"
-          mv base.img "${NAME}.img"
+          mv /tmp/tamagci-img/base.img "${NAME}.img"
           xz -T0 -6 "${NAME}.img"
           sha256sum "${NAME}.img.xz" > "${NAME}.img.xz.sha256"
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
