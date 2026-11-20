@@ -39,6 +39,7 @@ ${SUDO} apt-get install -y \
     wireplumber \
     libspa-0.2-bluetooth \
     network-manager \
+    dnsmasq-base \
     rfkill \
     curl \
     jq
