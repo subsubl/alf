@@ -13,6 +13,7 @@ import collections
 import json
 import logging
 import socket
+import struct
 import sys
 import time
 from pathlib import Path
@@ -72,6 +73,29 @@ class PiCompanionHub:
         aud_cfg = cfg["audio"]
         self.allow_unauthenticated_dev: bool = bool(q_cfg.get("allow_unauthenticated_dev", False))
 
+        raw_friends = q_cfg.get("trusted_contacts", {})
+        self.trusted_contacts: Dict[str, str] = {}
+        if isinstance(raw_friends, dict):
+            for k, v in raw_friends.items():
+                addr_s = str(k).strip()
+                if addr_s:
+                    self.trusted_contacts[addr_s] = str(v or "").strip()
+        elif isinstance(raw_friends, list):
+            for item in raw_friends:
+                if isinstance(item, dict):
+                    addr_s = str(item.get("address", "")).strip()
+                    if addr_s:
+                        self.trusted_contacts[addr_s] = str(item.get("nickname", item.get("nick", "")) or "").strip()
+                else:
+                    addr_s = str(item).strip()
+                    if addr_s:
+                        self.trusted_contacts[addr_s] = ""
+
+        self.auto_accept_friend_calls: bool = bool(q_cfg.get("auto_accept_friend_calls", True))
+        self.display_friend_messages_on_esp: bool = bool(
+            q_cfg.get("display_friend_messages_on_esp", True)
+        )
+
         self.esp = EspSerialBridge(
             port=ser_cfg["port"],
             baudrate=int(ser_cfg.get("baudrate", 921600)),
@@ -119,7 +143,8 @@ class PiCompanionHub:
             on_session_started=self._on_voip_started,
             on_session_ended=self._on_voip_ended,
             on_request_error=self._on_voip_request_error,
-            authorize_caller=self._is_authorized_server,
+            authorize_caller=self._is_authorized_voip_caller,
+            can_preempt_caller=self._can_friend_preempt_call,
         )
         self.quixi.attach_voip_manager(self.voip)
         self._last_ping_ts = 0.0
@@ -187,6 +212,7 @@ class PiCompanionHub:
         await self.esp.set_debug(quixi="ONLINE", voip="DIALING", bt_spk="OK")
         await self.esp.set_state("IDLE", "Connecting to AI Server...")
         await self.refresh_and_push_network_info()
+        await self.sync_quixi_contacts()
 
         # Initiate persistent spixi.voip call with the AI Server via QuIXI
         if self._is_valid_server_address():
@@ -198,6 +224,7 @@ class PiCompanionHub:
         try:
             while True:
                 await self.refresh_and_push_network_info()
+                await self.sync_quixi_contacts()
                 # Re-attempt call setup if not currently connected
                 if not self.voip.is_in_call and self._is_valid_server_address():
                     try:
@@ -220,6 +247,83 @@ class PiCompanionHub:
             return bool(getattr(self, "allow_unauthenticated_dev", False))
         return bool(sender) and sender == self.server_address
 
+    def add_trusted_friend(self, address: str, nickname: str = "") -> Dict[str, str]:
+        """Register or update a trusted Spixi friend contact on the Pi Hub."""
+        addr = (address or "").strip()
+        if not addr:
+            return dict(self.trusted_contacts)
+        nick = (nickname or "").strip()
+        if nick or addr not in self.trusted_contacts:
+            self.trusted_contacts[addr] = nick
+        return dict(self.trusted_contacts)
+
+    def remove_trusted_friend(self, address: str) -> bool:
+        """Remove a Spixi contact from the Pi Hub trusted friends registry."""
+        addr = (address or "").strip()
+        return self.trusted_contacts.pop(addr, None) is not None
+
+    def get_contact_display_name(self, address: str) -> str:
+        """Return a human-friendly nickname or short address for ESP32-S3 LCD subtitles."""
+        addr = (address or "").strip()
+        if not addr:
+            return "Unknown"
+        if addr == self.server_address:
+            return "AI Server"
+        nick = self.trusted_contacts.get(addr, "").strip()
+        if nick:
+            return nick
+        return addr[:10] + (".." if len(addr) > 10 else "")
+
+    async def sync_quixi_contacts(self) -> Dict[str, str]:
+        """Auto-sync local QuIXI /contacts into trusted_contacts so paired Spixi friends can call & message."""
+        try:
+            res = await self.quixi.contacts()
+            raw = res.get("result", res) if isinstance(res, dict) else res
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict):
+                        c_addr = str(item.get("address") or item.get("id") or "").strip()
+                        c_nick = str(item.get("nick") or item.get("nickname") or item.get("name") or "").strip()
+                        if c_addr and c_addr != self.server_address:
+                            self.add_trusted_friend(c_addr, c_nick)
+                    elif isinstance(item, str):
+                        c_addr = item.strip()
+                        if c_addr and c_addr != self.server_address:
+                            self.add_trusted_friend(c_addr)
+            elif isinstance(raw, dict):
+                for k, v in raw.items():
+                    c_addr = str(k).strip()
+                    if c_addr and c_addr not in ("result", "error") and c_addr != self.server_address:
+                        c_nick = str(v.get("nick", "") if isinstance(v, dict) else (v or "")).strip()
+                        self.add_trusted_friend(c_addr, c_nick)
+        except Exception:
+            pass
+        return dict(self.trusted_contacts)
+
+    def _is_authorized_friend(self, sender: str) -> bool:
+        sender = (sender or "").strip()
+        return bool(sender) and sender != self.server_address and sender in self.trusted_contacts
+
+    def _is_authorized_voip_caller(self, sender: str) -> bool:
+        return self._is_authorized_server(sender) or (
+            self.auto_accept_friend_calls and self._is_authorized_friend(sender)
+        )
+
+    def _can_friend_preempt_call(self, incoming_caller: str, current_contact: Optional[str]) -> bool:
+        return bool(
+            self.auto_accept_friend_calls
+            and self._is_authorized_friend(incoming_caller)
+            and (not current_contact or current_contact == self.server_address)
+        )
+
+    @property
+    def is_in_friend_call(self) -> bool:
+        return bool(
+            self.voip.is_in_call
+            and self.voip.current_contact
+            and self._is_authorized_friend(self.voip.current_contact)
+        )
+
     async def _send_agent_app_data(self, target_addr: str, payload: Dict[str, Any]) -> bool:
         target = (target_addr or self.server_address or "").strip()
         if not target or target.startswith("1Replace"):
@@ -238,11 +342,27 @@ class PiCompanionHub:
             return False
 
     async def _on_voip_started(self, contact: str, sid: bytes, codec: str) -> None:
+        if self._is_authorized_friend(contact):
+            self._mark_active_turn_interrupted()
+            self.audio.stop_playback()
+            if self.audio.earcons_enabled:
+                self.audio.play_earcon("awake")
+            sub = f"Call: {self.get_contact_display_name(contact)}"
+            await self.esp.set_debug(quixi="ONLINE", voip="FRIEND", bt_spk="OK")
+            await self.esp.set_state("HAPPY", sub)
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(emo="HAPPY", sub=sub, mouth=0)
+            return
         await self.esp.set_debug(quixi="ONLINE", voip="IN_CALL", bt_spk="OK")
         await self.esp.set_state("IDLE", "Ready! Speak or tap face.")
 
     async def _on_voip_ended(self, contact: str, sid: bytes, codec: str) -> None:
         await self.esp.set_debug(quixi="ONLINE", voip="IDLE")
+        if self._is_authorized_friend(contact):
+            await self.esp.set_mouth(0)
+            await self.esp.set_state("IDLE", "Call ended.")
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(emo="IDLE", sub="Call ended.", mouth=0)
 
     async def _on_voip_request_error(self, contact: str, sid: bytes, detail: str) -> None:
         logger.warning("VoIP request error from %s session=%s: %s", contact, sid.hex(), detail)
@@ -266,10 +386,22 @@ class PiCompanionHub:
 
     async def _on_speech_capture_state(self, active: bool) -> None:
         if active:
+            if self.is_in_friend_call:
+                sub = f"Call: {self.get_contact_display_name(self.voip.current_contact or '')}"
+                await self.esp.set_state("LISTENING", sub, mic=1)
+                if hasattr(self, "gui") and self.gui is not None:
+                    self.gui.update_face_state(emo="LISTENING", sub=sub)
+                return
             await self.esp.set_state("LISTENING", "Listening...", mic=1)
             if hasattr(self, "gui") and self.gui is not None:
                 self.gui.update_face_state(emo="LISTENING", sub="Listening...")
         else:
+            if self.is_in_friend_call:
+                sub = f"Call: {self.get_contact_display_name(self.voip.current_contact or '')}"
+                await self.esp.set_state("HAPPY", sub, mic=0)
+                if hasattr(self, "gui") and self.gui is not None:
+                    self.gui.update_face_state(emo="HAPPY", sub=sub)
+                return
             await self.esp.set_state("THINKING", "Thinking...", mic=0)
             if hasattr(self, "gui") and self.gui is not None:
                 self.gui.update_face_state(emo="THINKING", sub="Thinking...")
@@ -320,17 +452,57 @@ class PiCompanionHub:
             if hasattr(self, "gui") and self.gui is not None:
                 self.gui.update_face_state(emo="IDLE", mouth=0)
 
+    @staticmethod
+    def _estimate_pcm16_mouth_openness(data: bytes) -> int:
+        if len(data) < 2:
+            return 0
+        count = min(len(data) // 2, 640)
+        samples = struct.unpack(f"<{count}h", data[: count * 2])
+        rms = (sum(s * s for s in samples) / count) ** 0.5
+        if rms < 120:
+            return 0
+        return max(10, min(100, int(rms / 65.0)))
+
     async def _on_voip_rx_audio(self, session_id: bytes, data: bytes, codec: str) -> None:
-        """VoIPManager.onData equivalent: write incoming TTS audio to BT speaker."""
-        if self._is_turn_capture_blocking_playback():
+        """VoIPManager.onData equivalent: write incoming TTS or Spixi friend audio to BT speaker."""
+        if not self.is_in_friend_call and self._is_turn_capture_blocking_playback():
             return
         self.audio.feed_tts_audio(data)
+        if self.is_in_friend_call:
+            mouth_val = self._estimate_pcm16_mouth_openness(data)
+            await self.esp.set_mouth(mouth_val)
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(mouth=mouth_val)
 
     async def _on_quixi_chat_event(self, topic: str, payload: Dict[str, Any]) -> None:
+        sender = str(payload.get("sender", "")).strip()
+        raw = _extract_b64_bytes(payload)
+        msg = raw.decode("utf-8", errors="ignore").strip() if raw else ""
+        if not msg:
+            inner = payload.get("data")
+            if isinstance(inner, dict) and isinstance(inner.get("message"), str):
+                msg = inner["message"].strip()
+            elif isinstance(payload.get("message"), str):
+                msg = payload["message"].strip()
+
         if hasattr(self, "gui") and self.gui is not None:
-            raw = _extract_b64_bytes(payload)
-            msg = raw.decode("utf-8", errors="ignore") if raw else ""
             self.gui.record_quixi_event(topic, payload, summary=msg)
+
+        if not msg or not self.display_friend_messages_on_esp:
+            return
+        if not (self._is_authorized_friend(sender) or self._is_authorized_server(sender)):
+            return
+
+        if self._is_authorized_friend(sender):
+            sub_text = f"{self.get_contact_display_name(sender)}: {msg}"[:180]
+        else:
+            sub_text = msg[:180]
+
+        if self.audio.earcons_enabled and not self.audio.is_speaking:
+            self.audio.play_earcon("awake")
+        await self.esp.set_state("HAPPY", sub_text)
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.update_face_state(emo="HAPPY", sub=sub_text)
 
     async def _on_quixi_friend_event(self, topic: str, payload: Dict[str, Any]) -> None:
         if hasattr(self, "gui") and self.gui is not None:
@@ -399,7 +571,8 @@ class PiCompanionHub:
     async def _on_chat_stream(self, topic: str, payload: Dict[str, Any]) -> None:
         """Display real-time streaming text chunks from QuIXI ChatStream."""
         sender = str(payload.get("sender", "")).strip()
-        if not self._is_authorized_server(sender):
+        is_friend = self._is_authorized_friend(sender) and self.display_friend_messages_on_esp
+        if not (self._is_authorized_server(sender) or is_friend):
             return
         try:
             inner = payload.get("data")
@@ -449,7 +622,11 @@ class PiCompanionHub:
                 display_text = text[-180:]
 
             if display_text:
-                await self.esp.set_state("SPEAKING", display_text)
+                if is_friend:
+                    sub_text = f"{self.get_contact_display_name(sender)}: {display_text}"[:180]
+                    await self.esp.set_state("HAPPY", sub_text)
+                else:
+                    await self.esp.set_state("SPEAKING", display_text)
         except Exception:
             pass
 

@@ -312,11 +312,22 @@ class PiWebGUI:
                 "mqtt_host": getattr(quixi, "mqtt_host", "127.0.0.1"),
                 "mqtt_port": getattr(quixi, "mqtt_port", 1883),
                 "cfg": self.read_ixian_cfg_masked(),
+                "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                "auto_accept_friend_calls": bool(getattr(self.hub, "auto_accept_friend_calls", True)),
+                "display_friend_messages_on_esp": bool(
+                    getattr(self.hub, "display_friend_messages_on_esp", True)
+                ),
                 "recent_events": list(self.quixi_event_log)[-25:],
             },
             "voip": {
                 "in_call": bool(getattr(voip, "is_in_call", False)),
+                "in_friend_call": bool(getattr(self.hub, "is_in_friend_call", False)),
                 "contact": getattr(voip, "current_contact", None),
+                "contact_name": (
+                    self.hub.get_contact_display_name(voip.current_contact)
+                    if getattr(voip, "current_contact", None) and hasattr(self.hub, "get_contact_display_name")
+                    else None
+                ),
                 "codec": getattr(voip, "current_codec", None),
                 "session_id": (
                     voip.current_session_id.hex()
@@ -371,7 +382,15 @@ class PiWebGUI:
         # 2. QuIXI Account, Wallet, Contacts & RPC Endpoints
         # --------------------------------------------------------------
         if method == "GET" and route == "/api/quixi/overview":
-            overview: Dict[str, Any] = {"ok": True, "cfg": self.read_ixian_cfg_masked()}
+            overview: Dict[str, Any] = {
+                "ok": True,
+                "cfg": self.read_ixian_cfg_masked(),
+                "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                "auto_accept_friend_calls": bool(getattr(self.hub, "auto_accept_friend_calls", True)),
+                "display_friend_messages_on_esp": bool(
+                    getattr(self.hub, "display_friend_messages_on_esp", True)
+                ),
+            }
             for key, fn in (
                 ("status", self.hub.quixi.status),
                 ("wallet", self.hub.quixi.my_wallet),
@@ -440,29 +459,67 @@ class PiWebGUI:
             search = query.get("search", "").strip() or None
             try:
                 res = await self.hub.quixi.contacts(search=search)
-                return 200, {"ok": True, "contacts": res.get("result", res)}
+                return 200, {
+                    "ok": True,
+                    "contacts": res.get("result", res),
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                }
             except (QuIXIError, Exception) as exc:
                 return 502, {"ok": False, "error": str(exc)}
 
         if method == "POST" and route == "/api/quixi/contacts/add":
             addr = str(payload.get("address") or "").strip()
+            nickname = str(payload.get("nickname") or payload.get("nick") or "").strip()
             if not addr:
                 return 400, {"ok": False, "error": "Missing 'address'"}
             try:
                 res = await self.hub.quixi.add_contact(addr)
-                self.broadcast_event("contact_added", {"address": addr, "result": res})
-                return 200, {"ok": True, "address": addr, "result": res.get("result", res)}
+                if hasattr(self.hub, "add_trusted_friend"):
+                    self.hub.add_trusted_friend(addr, nickname)
+                self.broadcast_event(
+                    "contact_added",
+                    {
+                        "address": addr,
+                        "nickname": nickname,
+                        "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                        "result": res,
+                    },
+                )
+                return 200, {
+                    "ok": True,
+                    "address": addr,
+                    "nickname": nickname,
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                    "result": res.get("result", res),
+                }
             except (QuIXIError, Exception) as exc:
                 return 502, {"ok": False, "error": str(exc)}
 
         if method == "POST" and route == "/api/quixi/contacts/accept":
             addr = str(payload.get("address") or "").strip()
+            nickname = str(payload.get("nickname") or payload.get("nick") or "").strip()
             if not addr:
                 return 400, {"ok": False, "error": "Missing 'address'"}
             try:
                 res = await self.hub.quixi.accept_contact(addr)
-                self.broadcast_event("contact_accepted", {"address": addr, "result": res})
-                return 200, {"ok": True, "address": addr, "result": res.get("result", res)}
+                if hasattr(self.hub, "add_trusted_friend"):
+                    self.hub.add_trusted_friend(addr, nickname)
+                self.broadcast_event(
+                    "contact_accepted",
+                    {
+                        "address": addr,
+                        "nickname": nickname,
+                        "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                        "result": res,
+                    },
+                )
+                return 200, {
+                    "ok": True,
+                    "address": addr,
+                    "nickname": nickname,
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                    "result": res.get("result", res),
+                }
             except (QuIXIError, Exception) as exc:
                 return 502, {"ok": False, "error": str(exc)}
 
@@ -472,10 +529,81 @@ class PiWebGUI:
                 return 400, {"ok": False, "error": "Missing 'address'"}
             try:
                 res = await self.hub.quixi.remove_contact(addr)
-                self.broadcast_event("contact_removed", {"address": addr, "result": res})
-                return 200, {"ok": True, "address": addr, "result": res.get("result", res)}
+                if hasattr(self.hub, "remove_trusted_friend"):
+                    self.hub.remove_trusted_friend(addr)
+                self.broadcast_event(
+                    "contact_removed",
+                    {
+                        "address": addr,
+                        "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                        "result": res,
+                    },
+                )
+                return 200, {
+                    "ok": True,
+                    "address": addr,
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                    "result": res.get("result", res),
+                }
             except (QuIXIError, Exception) as exc:
                 return 502, {"ok": False, "error": str(exc)}
+
+        if route == "/api/quixi/friends":
+            if method == "GET":
+                return 200, {
+                    "ok": True,
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                    "auto_accept_friend_calls": bool(getattr(self.hub, "auto_accept_friend_calls", True)),
+                    "display_friend_messages_on_esp": bool(
+                        getattr(self.hub, "display_friend_messages_on_esp", True)
+                    ),
+                }
+            if method == "POST":
+                act = str(payload.get("action") or "add").strip().lower()
+                if "auto_accept_friend_calls" in payload:
+                    self.hub.auto_accept_friend_calls = bool(payload["auto_accept_friend_calls"])
+                if "display_friend_messages_on_esp" in payload:
+                    self.hub.display_friend_messages_on_esp = bool(payload["display_friend_messages_on_esp"])
+
+                addr = str(payload.get("address") or "").strip()
+                nickname = str(payload.get("nickname") or payload.get("nick") or "").strip()
+                quixi_steps: Dict[str, Any] = {}
+
+                if act == "sync" and hasattr(self.hub, "sync_quixi_contacts"):
+                    await self.hub.sync_quixi_contacts()
+                elif act in ("remove", "delete") and addr:
+                    if hasattr(self.hub, "remove_trusted_friend"):
+                        self.hub.remove_trusted_friend(addr)
+                    if payload.get("quixi_remove", False):
+                        try:
+                            quixi_steps["removeContact"] = await self.hub.quixi.remove_contact(addr)
+                        except Exception as exc:
+                            quixi_steps["removeContact_error"] = str(exc)
+                elif addr:
+                    if hasattr(self.hub, "add_trusted_friend"):
+                        self.hub.add_trusted_friend(addr, nickname)
+                    if payload.get("quixi_add", True):
+                        try:
+                            quixi_steps["addContact"] = await self.hub.quixi.add_contact(addr)
+                        except Exception as exc:
+                            quixi_steps["addContact_error"] = str(exc)
+                    if payload.get("quixi_accept", True):
+                        try:
+                            quixi_steps["acceptContact"] = await self.hub.quixi.accept_contact(addr)
+                        except Exception as exc:
+                            quixi_steps["acceptContact_error"] = str(exc)
+
+                resp_data = {
+                    "ok": True,
+                    "trusted_contacts": dict(getattr(self.hub, "trusted_contacts", {})),
+                    "auto_accept_friend_calls": bool(getattr(self.hub, "auto_accept_friend_calls", True)),
+                    "display_friend_messages_on_esp": bool(
+                        getattr(self.hub, "display_friend_messages_on_esp", True)
+                    ),
+                    **quixi_steps,
+                }
+                self.broadcast_event("friends_updated", resp_data)
+                return 200, resp_data
 
         if method == "POST" and route == "/api/quixi/pair_server":
             addr = str(payload.get("server_ixian_address") or payload.get("address") or "").strip()
@@ -1146,16 +1274,21 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
 
       <section class="card">
         <div class="card-hdr">
-          <h2>3 · Contacts, Friend Requests & AI Server Pairing</h2>
+          <h2>3 · Spixi Friends, Direct Voice Calls & AI Server Pairing</h2>
           <button class="btn" onclick="refreshContacts()">Refresh</button>
         </div>
         <div class="row">
-          <input type="text" id="contactAddrInput" placeholder="Paste Ixian Wallet Address..." style="flex:1" />
+          <input type="text" id="contactAddrInput" placeholder="Paste Spixi / QuIXI Wallet Address..." style="flex:1" />
+          <input type="text" id="contactNickInput" placeholder="Nickname (e.g. Alice)" style="width:130px" />
         </div>
         <div class="row">
-          <button class="btn btn-primary" onclick="addContact()">Send Friend Request</button>
-          <button class="btn" onclick="acceptContact()">Accept Request</button>
+          <button class="btn btn-primary" onclick="addContact()">Add Friend</button>
+          <button class="btn" onclick="acceptContact()">Accept Friend</button>
           <button class="btn" onclick="pairAsServer()">Pair as AI Server & Dial</button>
+        </div>
+        <div class="row-between" style="font-size:0.76rem;color:var(--text-1);">
+          <label><input type="checkbox" id="chkAutoAcceptFriends" checked onchange="saveFriendPrefs()" /> Auto-accept Spixi friend voice calls</label>
+          <label><input type="checkbox" id="chkDisplayFriendMsgs" checked onchange="saveFriendPrefs()" /> Show incoming msgs on ESP32</label>
         </div>
         <div id="contactsList" style="display:flex;flex-direction:column;gap:6px;"></div>
       </section>
@@ -1297,6 +1430,7 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
   const PINS = [15,16,17,18,21,33,34,35,36,37];
   let faceState = { emo: "IDLE", sub: "Ready!", mouth: 0 };
+  let trustedContacts = {};
   let pinVals = {};
   let blinkTick = 0;
 
@@ -1346,6 +1480,15 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById("micBadge").textContent = "Mic: " + s.audio.mic_mode;
       document.getElementById("audioStatusBox").textContent = JSON.stringify(s.audio, null, 2);
     }
+    if (s.quixi) {
+      if (s.quixi.trusted_contacts) trustedContacts = s.quixi.trusted_contacts;
+      if (typeof s.quixi.auto_accept_friend_calls === "boolean") {
+        document.getElementById("chkAutoAcceptFriends").checked = s.quixi.auto_accept_friend_calls;
+      }
+      if (typeof s.quixi.display_friend_messages_on_esp === "boolean") {
+        document.getElementById("chkDisplayFriendMsgs").checked = s.quixi.display_friend_messages_on_esp;
+      }
+    }
     if (s.quixi && s.quixi.cfg) {
       document.getElementById("cfgNetType").value = s.quixi.cfg.networkType || "mainnet";
       document.getElementById("cfgApiPort").value = s.quixi.cfg.apiPort || 8001;
@@ -1360,24 +1503,42 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
     if (!o.ok) return;
     document.getElementById("quixiBadge").textContent = "QuIXI: ONLINE";
     if (typeof o.nick === "string") document.getElementById("qNick").value = o.nick;
+    if (o.trusted_contacts) trustedContacts = o.trusted_contacts;
     document.getElementById("walletBox").textContent = JSON.stringify(
       { wallet: o.wallet, balance: o.balance, status: o.status },
       null,
       2
     );
-    renderContactsList(o.contacts);
+    renderContactsList(o.contacts, trustedContacts);
   }
 
-  function renderContactsList(contacts) {
+  function renderContactsList(contacts, trustedMap) {
     const box = document.getElementById("contactsList");
     box.innerHTML = "";
+    const seen = new Set();
     const arr = Array.isArray(contacts) ? contacts : [];
+    const tMap = trustedMap || trustedContacts || {};
+    const items = [];
     arr.forEach(c => {
       const addr = typeof c === "string" ? c : (c.address || JSON.stringify(c));
+      if (addr && !seen.has(addr)) {
+        seen.add(addr);
+        items.push({ addr, nick: tMap[addr] || (typeof c === "object" && c.nick ? c.nick : "") });
+      }
+    });
+    Object.keys(tMap).forEach(addr => {
+      if (addr && !seen.has(addr)) {
+        seen.add(addr);
+        items.push({ addr, nick: tMap[addr] || "" });
+      }
+    });
+    items.forEach(({ addr, nick }) => {
       const div = document.createElement("div");
       div.className = "contact-item";
-      div.innerHTML = `<span class="contact-addr" title="${addr}">${addr}</span>
+      const label = nick ? `<strong>${nick}</strong> · ${addr}` : addr;
+      div.innerHTML = `<span class="contact-addr" title="${addr}">${label}</span>
         <div class="row">
+          <button class="btn btn-primary" onclick="callContact('${addr}')">Call</button>
           <button class="btn" onclick="acceptContact('${addr}')">Accept</button>
           <button class="btn btn-danger" onclick="removeContact('${addr}')">Remove</button>
         </div>`;
@@ -1424,26 +1585,46 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
 
   async function refreshContacts() {
     const r = await api("/api/quixi/contacts");
-    if (r.ok) renderContactsList(r.contacts);
+    if (r.ok) {
+      if (r.trusted_contacts) trustedContacts = r.trusted_contacts;
+      renderContactsList(r.contacts, trustedContacts);
+    }
   }
 
   async function addContact() {
     const address = document.getElementById("contactAddrInput").value.trim();
+    const nickname = document.getElementById("contactNickInput").value.trim();
     if (!address) return;
-    await api("/api/quixi/contacts/add", { method: "POST", body: JSON.stringify({ address }) });
+    await api("/api/quixi/contacts/add", { method: "POST", body: JSON.stringify({ address, nickname }) });
+    document.getElementById("contactNickInput").value = "";
     refreshContacts();
   }
 
   async function acceptContact(addrArg) {
     const address = addrArg || document.getElementById("contactAddrInput").value.trim();
+    const nickname = addrArg ? "" : document.getElementById("contactNickInput").value.trim();
     if (!address) return;
-    await api("/api/quixi/contacts/accept", { method: "POST", body: JSON.stringify({ address }) });
+    await api("/api/quixi/contacts/accept", { method: "POST", body: JSON.stringify({ address, nickname }) });
     refreshContacts();
   }
 
   async function removeContact(address) {
     await api("/api/quixi/contacts/remove", { method: "POST", body: JSON.stringify({ address }) });
     refreshContacts();
+  }
+
+  async function callContact(address) {
+    document.getElementById("chatTargetInput").value = address;
+    await voipAction("dial");
+  }
+
+  async function saveFriendPrefs() {
+    const auto_accept_friend_calls = document.getElementById("chkAutoAcceptFriends").checked;
+    const display_friend_messages_on_esp = document.getElementById("chkDisplayFriendMsgs").checked;
+    await api("/api/quixi/friends", {
+      method: "POST",
+      body: JSON.stringify({ action: "prefs", auto_accept_friend_calls, display_friend_messages_on_esp })
+    });
   }
 
   async function pairAsServer() {

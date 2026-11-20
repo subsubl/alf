@@ -1296,6 +1296,141 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                 finally:
                     await hub.esp.stop()
 
+    async def test_spixi_friends_direct_incoming_voice_call_and_esp32_message_display(self) -> None:
+        """Verify adding Spixi friends on the Pi, accepting incoming friend voice calls directly, and displaying friend messages on the ESP32-S3 LCD while preserving Zero-Trust RPC isolation."""
+        from common_ixian.spixi_voip import (
+            SPIXI_VOIP_APP_ID,
+            AppDataMessage,
+            SpixiMessageCode,
+            pack_app_data_message,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, esp, bus, port = _make_hub_with_mocks(Path(tmp))
+            with patch("pi_hub.esp_serial_bridge.serial.Serial", return_value=port):
+                await hub.esp.start()
+                try:
+                    # 1. Start with an active background AI Server VoIP session
+                    srv_sid = await hub.voip.initiate_call(hub.server_address)
+                    await hub.voip.on_accepted_call(
+                        hub.server_address,
+                        AppDataMessage(session_id=srv_sid, data=b"pcm"),
+                    )
+                    self.assertTrue(hub.voip.is_in_call)
+                    self.assertFalse(hub.is_in_friend_call)
+                    self.assertEqual(hub.voip.current_contact, "1SrvAddrTest")
+
+                    # 2. Add a Spixi friend ("Alice" at 1SpixiFriendAlice) via Pi Web GUI
+                    code, add_res = await hub.gui.handle_api_request(
+                        "POST",
+                        "/api/quixi/contacts/add",
+                        body={"address": "1SpixiFriendAlice", "nickname": "Alice"},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertEqual(hub.trusted_contacts.get("1SpixiFriendAlice"), "Alice")
+                    self.assertEqual(hub.get_contact_display_name("1SpixiFriendAlice"), "Alice")
+
+                    # 3. Incoming Chat message from an unauthorized stranger is NOT displayed on ESP32
+                    esp.sub = "Ready!"
+                    stranger_msg_b64 = base64.b64encode(b"Spam from stranger").decode("ascii")
+                    await hub._on_quixi_chat_event(
+                        "Chat",
+                        {"sender": "1StrangerDanger", "data": {"data": stranger_msg_b64}},
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertEqual(esp.sub, "Ready!")
+
+                    # 4. Incoming Chat message from trusted friend Alice IS displayed on ESP32 LCD ("Alice: Hey from Spixi!")
+                    alice_msg_b64 = base64.b64encode(b"Hey from Spixi!").decode("ascii")
+                    await hub._on_quixi_chat_event(
+                        "Chat",
+                        {"sender": "1SpixiFriendAlice", "data": {"data": alice_msg_b64}},
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertEqual(esp.emo, "HAPPY")
+                    self.assertEqual(esp.sub, "Alice: Hey from Spixi!")
+
+                    # 5. Incoming Spixi voice call from unauthorized stranger is REJECTED
+                    stranger_sid = b"\x99" * 16
+                    accepted_stranger = await hub.voip.on_received_call(
+                        "1StrangerDanger",
+                        AppDataMessage(session_id=stranger_sid, data=b"pcm|opus", app_id=SPIXI_VOIP_APP_ID),
+                    )
+                    self.assertFalse(accepted_stranger)
+                    self.assertEqual(hub.voip.current_contact, "1SrvAddrTest")
+
+                    # 6. Incoming Spixi voice call from trusted friend Alice preempts idle AI Server session & auto-accepts!
+                    alice_sid = b"\x42" * 16
+                    accepted_alice = await hub.voip.on_received_call(
+                        "1SpixiFriendAlice",
+                        AppDataMessage(session_id=alice_sid, data=b"pcm|opus", app_id=SPIXI_VOIP_APP_ID),
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertTrue(accepted_alice)
+                    self.assertTrue(hub.voip.is_in_call)
+                    self.assertTrue(hub.is_in_friend_call)
+                    self.assertEqual(hub.voip.current_contact, "1SpixiFriendAlice")
+                    self.assertEqual(esp.emo, "HAPPY")
+                    self.assertEqual(esp.sub, "Call: Alice")
+
+                    # 7. Incoming voice audio from Alice plays on speaker and animates ESP32 mouth
+                    loud_pcm = make_pcm16_sine(440.0, 0.06, 16000)
+                    await hub.voip.on_data(
+                        "1SpixiFriendAlice",
+                        AppDataMessage(session_id=alice_sid, data=loud_pcm),
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertGreater(esp.mouth, 0)
+                    self.assertFalse(hub.audio._play_queue.empty())
+
+                    # 8. Speaking on the Pi during a friend call does NOT send end_of_turn to the AI Server
+                    sent_app_data: list[dict] = []
+                    orig_send_app = hub._send_agent_app_data
+
+                    async def spy_send_app(target: str, payload: dict) -> bool:
+                        sent_app_data.append(payload)
+                        return await orig_send_app(target, payload)
+
+                    hub._send_agent_app_data = spy_send_app  # type: ignore[assignment]
+                    await hub._on_speech_capture_state(True)
+                    await asyncio.sleep(0.02)
+                    self.assertEqual(esp.emo, "LISTENING")
+                    self.assertEqual(esp.sub, "Call: Alice")
+                    await hub._on_speech_capture_state(False)
+                    await asyncio.sleep(0.02)
+                    self.assertEqual(esp.emo, "HAPPY")
+                    self.assertEqual(esp.sub, "Call: Alice")
+                    self.assertEqual(sent_app_data, [])
+
+                    # 9. Zero-Trust security invariant: trusted friend Alice STILL cannot execute hardware tool_call RPCs!
+                    esp.gpio_vals[16] = 0
+                    malicious_tool = base64.b64encode(
+                        json.dumps(
+                            {
+                                "kind": "tool_call",
+                                "call_id": "hack1",
+                                "tool": "gpio_configure_and_write",
+                                "args": {"pin": 16, "mode": "out", "state": 1},
+                            }
+                        ).encode("utf-8")
+                    ).decode("ascii")
+                    await hub._on_app_protocol_data(
+                        "AppProtocolData",
+                        {"sender": "1SpixiFriendAlice", "data": {"data": malicious_tool}},
+                    )
+                    await asyncio.sleep(0.02)
+                    self.assertEqual(esp.gpio_vals.get(16, 0), 0)
+
+                    # 10. Hangup friend call resets ESP32 mouth & subtitle
+                    await hub.voip.on_hangup_call(AppDataMessage(session_id=alice_sid, data=b""))
+                    await asyncio.sleep(0.03)
+                    self.assertFalse(hub.voip.is_in_call)
+                    self.assertEqual(esp.mouth, 0)
+                    self.assertEqual(esp.sub, "Call ended.")
+                finally:
+                    await hub.quixi.stop()
+                    await hub.esp.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

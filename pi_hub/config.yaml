@@ -8,6 +8,9 @@ quixi:
   mqtt_host: 127.0.0.1
   mqtt_port: 1883
   server_ixian_address: 1ReplaceWithYourServerQuIXIWalletAddress
+  trusted_contacts: {}                  # Optional Spixi friends map { "1FriendAddress": "Alice" } (auto-synced with QuIXI /contacts)
+  auto_accept_friend_calls: true        # Directly accept incoming Spixi voice calls from trusted friends on the Pi
+  display_friend_messages_on_esp: true  # Display incoming Spixi friend chat messages on the ESP32-S3 LCD
 
 audio:
   sample_rate: 16000

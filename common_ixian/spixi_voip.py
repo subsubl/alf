@@ -156,6 +156,7 @@ class SpixiVoIPSessionManager:
         on_session_ended: Optional[SessionEventCallback] = None,
         on_request_error: Optional[SessionEventCallback] = None,
         authorize_caller: Optional[Callable[[str], bool]] = None,
+        can_preempt_caller: Optional[Callable[[str, Optional[str]], bool]] = None,
         pending_timeout: float = 9.0,
     ) -> None:
         self._send_spixi = send_spixi_fn
@@ -165,6 +166,7 @@ class SpixiVoIPSessionManager:
         self._on_session_ended = on_session_ended
         self._on_request_error = on_request_error
         self._authorize_caller = authorize_caller
+        self._can_preempt_caller = can_preempt_caller
         self._pending_timeout = max(0.0, float(pending_timeout))
 
         self.current_session_id: Optional[bytes] = None
@@ -291,8 +293,14 @@ class SpixiVoIPSessionManager:
             else:
                 if self.current_session_id is not None and not self.has_session(app_msg.session_id):
                     elapsed = time.monotonic() - self._pending_since
-                    replaceable = (sender_address == self.current_contact) or (
-                        not self.is_in_call and elapsed >= self._pending_timeout
+                    can_preempt = bool(
+                        self._can_preempt_caller is not None
+                        and self._can_preempt_caller(sender_address, self.current_contact)
+                    )
+                    replaceable = (
+                        (sender_address == self.current_contact)
+                        or can_preempt
+                        or (not self.is_in_call and elapsed >= self._pending_timeout)
                     )
                     if not replaceable:
                         reject_bytes = pack_app_data_message(app_msg.session_id, b"")
