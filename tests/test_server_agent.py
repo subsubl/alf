@@ -802,7 +802,7 @@ class TestServerWebGUIAndOpenAIBridge(unittest.IsolatedAsyncioTestCase):
 
     async def test_mcp_server_tools_and_jsonrpc_endpoints(self) -> None:
         """Verify server-side MCP JSON-RPC 2.0 endpoint (/mcp) exposes and executes all companion tools."""
-        svc, quixi, bus = self._make_service()
+        svc, fake_ai, bus = _make_service_with_mocks(pi_addr="1RealPi")
         gui = svc.gui
         rpc_calls: list[tuple[str, dict]] = []
 
