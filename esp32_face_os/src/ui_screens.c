@@ -226,10 +226,11 @@ static void screen_gesture_cb(lv_event_t *e)
 
 static void add_nav_header(lv_obj_t *parent, const char *title)
 {
+    /* Keep nav buttons inside the 240x240 circular bezel safe chord (y=24..46, outer x=+-61) */
     lv_obj_t *btn_prev = lv_btn_create(parent);
-    lv_obj_set_size(btn_prev, 28, 24);
-    lv_obj_align(btn_prev, LV_ALIGN_TOP_MID, -54, 16);
-    lv_obj_set_style_radius(btn_prev, 12, 0);
+    lv_obj_set_size(btn_prev, 26, 22);
+    lv_obj_align(btn_prev, LV_ALIGN_TOP_MID, -48, 24);
+    lv_obj_set_style_radius(btn_prev, 11, 0);
     lv_obj_set_style_bg_color(btn_prev, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(btn_prev, 0, 0);
     lv_obj_add_event_cb(btn_prev, nav_prev_cb, LV_EVENT_CLICKED, NULL);
@@ -238,9 +239,9 @@ static void add_nav_header(lv_obj_t *parent, const char *title)
     lv_obj_center(lbl_p);
 
     lv_obj_t *btn_next = lv_btn_create(parent);
-    lv_obj_set_size(btn_next, 28, 24);
-    lv_obj_align(btn_next, LV_ALIGN_TOP_MID, 54, 16);
-    lv_obj_set_style_radius(btn_next, 12, 0);
+    lv_obj_set_size(btn_next, 26, 22);
+    lv_obj_align(btn_next, LV_ALIGN_TOP_MID, 48, 24);
+    lv_obj_set_style_radius(btn_next, 11, 0);
     lv_obj_set_style_bg_color(btn_next, lv_color_hex(0x1E293B), 0);
     lv_obj_set_style_pad_all(btn_next, 0, 0);
     lv_obj_add_event_cb(btn_next, nav_next_cb, LV_EVENT_CLICKED, NULL);
@@ -253,7 +254,7 @@ static void add_nav_header(lv_obj_t *parent, const char *title)
         lv_label_set_text(hdr, title);
         lv_obj_set_style_text_color(hdr, lv_color_hex(0x38BDF8), 0);
         lv_obj_set_style_text_font(hdr, &lv_font_montserrat_14, 0);
-        lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 19);
+        lv_obj_align(hdr, LV_ALIGN_TOP_MID, 0, 27);
     }
 
     lv_obj_add_event_cb(parent, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
@@ -742,10 +743,10 @@ static void build_face_screen(void)
     lv_obj_set_style_text_font(vbat_lbl, &lv_font_montserrat_12, 0);
     lv_obj_align(vbat_lbl, LV_ALIGN_TOP_MID, 0, 37);
 
-    /* Clipped non-scrollable subtitle box below mouth (y = 172..218) */
+    /* Clipped non-scrollable subtitle box inside bottom circular chord (y = 170..212, w = 136) */
     sub_box = lv_obj_create(scr_face);
-    lv_obj_set_size(sub_box, 164, 46);
-    lv_obj_align(sub_box, LV_ALIGN_BOTTOM_MID, 0, -22);
+    lv_obj_set_size(sub_box, 136, 42);
+    lv_obj_align(sub_box, LV_ALIGN_BOTTOM_MID, 0, -28);
     lv_obj_set_style_bg_opa(sub_box, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(sub_box, 0, 0);
     lv_obj_set_style_pad_all(sub_box, 2, 0);
@@ -753,7 +754,7 @@ static void build_face_screen(void)
     lv_obj_clear_flag(sub_box, LV_OBJ_FLAG_CLICKABLE);
 
     sub_lbl = lv_label_create(sub_box);
-    lv_obj_set_width(sub_lbl, 156);
+    lv_obj_set_width(sub_lbl, 130);
     lv_label_set_long_mode(sub_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(sub_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(sub_lbl, lv_color_hex(0xE2E8F0), 0);
@@ -860,38 +861,53 @@ static void build_debug_screen(void)
     add_nav_header(scr_debug, "DEBUG");
 
     dbg_link_lbl = lv_label_create(scr_debug);
+    lv_obj_set_width(dbg_link_lbl, 176);
+    lv_label_set_long_mode(dbg_link_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dbg_link_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(dbg_link_lbl, lv_color_hex(0x34D399), 0);
     lv_obj_set_style_text_font(dbg_link_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(dbg_link_lbl, "Q:WAIT V:IDLE");
     lv_obj_align(dbg_link_lbl, LV_ALIGN_TOP_MID, 0, 56);
 
     dbg_imu_lbl = lv_label_create(scr_debug);
+    lv_obj_set_width(dbg_imu_lbl, 196);
+    lv_label_set_long_mode(dbg_imu_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dbg_imu_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(dbg_imu_lbl, lv_color_hex(0xE2E8F0), 0);
     lv_obj_set_style_text_font(dbg_imu_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(dbg_imu_lbl, "IMU: waiting...");
     lv_obj_align(dbg_imu_lbl, LV_ALIGN_TOP_MID, 0, 80);
 
     dbg_ble_lbl = lv_label_create(scr_debug);
+    lv_obj_set_width(dbg_ble_lbl, 206);
+    lv_label_set_long_mode(dbg_ble_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dbg_ble_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(dbg_ble_lbl, lv_color_hex(0x93C5FD), 0);
     lv_obj_set_style_text_font(dbg_ble_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(dbg_ble_lbl, "BLE: 0 devs");
     lv_obj_align(dbg_ble_lbl, LV_ALIGN_TOP_MID, 0, 104);
 
     dbg_gpio_lbl = lv_label_create(scr_debug);
+    lv_obj_set_width(dbg_gpio_lbl, 206);
+    lv_label_set_long_mode(dbg_gpio_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dbg_gpio_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(dbg_gpio_lbl, lv_color_hex(0xFBBF24), 0);
     lv_obj_set_style_text_font(dbg_gpio_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(dbg_gpio_lbl, "GPIO: idle");
     lv_obj_align(dbg_gpio_lbl, LV_ALIGN_TOP_MID, 0, 128);
 
     dbg_sys_lbl = lv_label_create(scr_debug);
+    lv_obj_set_width(dbg_sys_lbl, 196);
+    lv_label_set_long_mode(dbg_sys_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(dbg_sys_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(dbg_sys_lbl, lv_color_hex(0x94A3B8), 0);
     lv_obj_set_style_text_font(dbg_sys_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(dbg_sys_lbl, "Rot:180 deg");
     lv_obj_align(dbg_sys_lbl, LV_ALIGN_TOP_MID, 0, 152);
 
     lv_obj_t *btn_test_call = lv_btn_create(scr_debug);
-    lv_obj_set_size(btn_test_call, 74, 26);
-    lv_obj_align(btn_test_call, LV_ALIGN_BOTTOM_MID, -40, -28);
+    lv_obj_set_size(btn_test_call, 68, 24);
+    lv_obj_align(btn_test_call, LV_ALIGN_BOTTOM_MID, -36, -32);
     lv_obj_set_style_bg_color(btn_test_call, lv_color_hex(0x2563EB), 0);
     lv_obj_add_event_cb(btn_test_call, dbg_test_call_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lp = lv_label_create(btn_test_call);
@@ -900,12 +916,12 @@ static void build_debug_screen(void)
     lv_obj_center(lp);
 
     lv_obj_t *btn_ble = lv_btn_create(scr_debug);
-    lv_obj_set_size(btn_ble, 74, 26);
-    lv_obj_align(btn_ble, LV_ALIGN_BOTTOM_MID, 40, -28);
+    lv_obj_set_size(btn_ble, 68, 24);
+    lv_obj_align(btn_ble, LV_ALIGN_BOTTOM_MID, 36, -32);
     lv_obj_set_style_bg_color(btn_ble, lv_color_hex(0x0D9488), 0);
     lv_obj_add_event_cb(btn_ble, dbg_ble_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lb = lv_label_create(btn_ble);
-    lv_label_set_text(lb, "BLE Refresh");
+    lv_label_set_text(lb, "BLE Scan");
     lv_obj_set_style_text_font(lb, &lv_font_montserrat_12, 0);
     lv_obj_center(lb);
 }
@@ -925,12 +941,18 @@ static void build_network_screen(void)
     add_nav_header(scr_network, "NETWORK");
 
     net_ip_lbl = lv_label_create(scr_network);
+    lv_obj_set_width(net_ip_lbl, 174);
+    lv_label_set_long_mode(net_ip_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(net_ip_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(net_ip_lbl, lv_color_hex(0x34D399), 0);
     lv_obj_set_style_text_font(net_ip_lbl, &lv_font_montserrat_14, 0);
     lv_label_set_text(net_ip_lbl, "RPi IP: waiting DHCP...");
     lv_obj_align(net_ip_lbl, LV_ALIGN_TOP_MID, 0, 52);
 
     net_gui_lbl = lv_label_create(scr_network);
+    lv_obj_set_width(net_gui_lbl, 190);
+    lv_label_set_long_mode(net_gui_lbl, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(net_gui_lbl, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(net_gui_lbl, lv_color_hex(0x93C5FD), 0);
     lv_obj_set_style_text_font(net_gui_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(net_gui_lbl, "GUI: http://--:8082");
@@ -943,7 +965,7 @@ static void build_network_screen(void)
     lv_obj_align(ixi_hdr, LV_ALIGN_TOP_MID, 0, 94);
 
     lv_obj_t *ixi_box = lv_obj_create(scr_network);
-    lv_obj_set_size(ixi_box, 196, 62);
+    lv_obj_set_size(ixi_box, 184, 58);
     lv_obj_align(ixi_box, LV_ALIGN_TOP_MID, 0, 112);
     lv_obj_set_style_bg_color(ixi_box, lv_color_hex(0x111827), 0);
     lv_obj_set_style_border_color(ixi_box, lv_color_hex(0x38BDF8), 0);
@@ -953,7 +975,7 @@ static void build_network_screen(void)
     lv_obj_clear_flag(ixi_box, LV_OBJ_FLAG_SCROLLABLE);
 
     net_ixi_lbl = lv_label_create(ixi_box);
-    lv_obj_set_width(net_ixi_lbl, 182);
+    lv_obj_set_width(net_ixi_lbl, 170);
     lv_label_set_long_mode(net_ixi_lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(net_ixi_lbl, lv_color_hex(0xF8FAFC), 0);
     lv_obj_set_style_text_font(net_ixi_lbl, &lv_font_montserrat_12, 0);
@@ -962,8 +984,8 @@ static void build_network_screen(void)
     lv_obj_center(net_ixi_lbl);
 
     lv_obj_t *btn_ref = lv_btn_create(scr_network);
-    lv_obj_set_size(btn_ref, 108, 26);
-    lv_obj_align(btn_ref, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_size(btn_ref, 108, 24);
+    lv_obj_align(btn_ref, LV_ALIGN_BOTTOM_MID, 0, -28);
     lv_obj_set_style_bg_color(btn_ref, lv_color_hex(0x2563EB), 0);
     lv_obj_add_event_cb(btn_ref, net_refresh_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_t *lr = lv_label_create(btn_ref);
