@@ -1427,6 +1427,71 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(hub.voip.is_in_call)
                     self.assertEqual(esp.mouth, 0)
                     self.assertEqual(esp.sub, "Call ended.")
+
+                    # 11. User says "Call Alice" -> LLM invokes update_companion_settings(spixi_action="call", contact_name="alice")
+                    # Re-establish background AI Server call first to verify force preemption
+                    srv_sid2 = await hub.voip.initiate_call(hub.server_address)
+                    await hub.voip.on_accepted_call(
+                        hub.server_address,
+                        AppDataMessage(session_id=srv_sid2, data=b"pcm"),
+                    )
+                    self.assertEqual(hub.voip.current_contact, "1SrvAddrTest")
+
+                    list_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"spixi_action": "list_contacts"},
+                    )
+                    self.assertTrue(list_res["ok"])
+                    self.assertEqual(list_res["spixi"]["trusted_contacts"]["1SpixiFriendAlice"], "Alice")
+
+                    call_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"spixi_action": "call", "contact_name": "alice"},
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertTrue(call_res["ok"])
+                    self.assertEqual(call_res["spixi"]["action"], "call")
+                    self.assertEqual(call_res["spixi"]["contact_name"], "Alice")
+                    self.assertEqual(call_res["spixi"]["address"], "1SpixiFriendAlice")
+                    self.assertEqual(hub.voip.current_contact, "1SpixiFriendAlice")
+                    self.assertEqual(esp.emo, "HAPPY")
+                    self.assertEqual(esp.sub, "Calling: Alice...")
+
+                    # When Alice accepts the outgoing call on Spixi, ESP32 LCD updates to "Call: Alice"
+                    out_sid = bytes.fromhex(call_res["spixi"]["session_id"])
+                    await hub.voip.on_accepted_call(
+                        "1SpixiFriendAlice",
+                        AppDataMessage(session_id=out_sid, data=b"pcm"),
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertTrue(hub.is_in_friend_call)
+                    self.assertEqual(esp.sub, "Call: Alice")
+
+                    # Also test LLM sending a Spixi chat message by nickname and hanging up via tool
+                    msg_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"spixi_action": "message", "contact_name": "Alice", "spixi_message": "On my way!"},
+                    )
+                    self.assertTrue(msg_res["ok"])
+                    self.assertEqual(msg_res["spixi"]["address"], "1SpixiFriendAlice")
+
+                    hup_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"spixi_action": "hangup"},
+                    )
+                    await asyncio.sleep(0.03)
+                    self.assertTrue(hup_res["ok"])
+                    self.assertFalse(hub.voip.is_in_call)
+                    self.assertEqual(esp.sub, "Call ended.")
+
+                    # Unknown contact nickname returns helpful available_contacts list
+                    unk_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"spixi_action": "call", "contact_name": "NonExistentBob"},
+                    )
+                    self.assertFalse(unk_res["ok"])
+                    self.assertIn("not found", unk_res["error"])
+                    self.assertTrue(any("Alice" in c for c in unk_res["available_contacts"]))
                 finally:
                     await hub.quixi.stop()
                     await hub.esp.stop()

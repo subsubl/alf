@@ -274,6 +274,28 @@ class PiCompanionHub:
             return nick
         return addr[:10] + (".." if len(addr) > 10 else "")
 
+    def resolve_spixi_contact(self, query: str) -> Optional[tuple[str, str]]:
+        """Resolve a Spixi contact by nickname (case-insensitive) or Ixian wallet address."""
+        q = (query or "").strip()
+        if not q:
+            return None
+        q_low = q.lower()
+        # 1. Exact address match
+        if q in self.trusted_contacts:
+            return q, self.get_contact_display_name(q)
+        # 2. Exact case-insensitive nickname match
+        for addr, nick in self.trusted_contacts.items():
+            if nick and nick.strip().lower() == q_low:
+                return addr, nick.strip()
+        # 3. Substring nickname or address prefix match
+        for addr, nick in self.trusted_contacts.items():
+            if (nick and q_low in nick.strip().lower()) or addr.lower().startswith(q_low):
+                return addr, self.get_contact_display_name(addr)
+        # 4. If query looks like a raw Ixian wallet address (starts with '1' and length >= 12)
+        if q.startswith("1") and len(q) >= 12 and " " not in q:
+            return q, self.get_contact_display_name(q)
+        return None
+
     async def sync_quixi_contacts(self) -> Dict[str, str]:
         """Auto-sync local QuIXI /contacts into trusted_contacts so paired Spixi friends can call & message."""
         try:
@@ -320,6 +342,14 @@ class PiCompanionHub:
     def is_in_friend_call(self) -> bool:
         return bool(
             self.voip.is_in_call
+            and self.voip.current_contact
+            and self._is_authorized_friend(self.voip.current_contact)
+        )
+
+    @property
+    def is_dialing_or_in_friend_call(self) -> bool:
+        return bool(
+            self.voip.current_session_id is not None
             and self.voip.current_contact
             and self._is_authorized_friend(self.voip.current_contact)
         )
@@ -448,6 +478,13 @@ class PiCompanionHub:
     async def _on_playback_done(self) -> None:
         self._current_tts_turn_id = None
         if not self.audio.is_capturing:
+            if self.is_dialing_or_in_friend_call:
+                friend_name = self.get_contact_display_name(self.voip.current_contact or "")
+                sub = f"Call: {friend_name}" if self.voip.is_in_call else f"Calling: {friend_name}..."
+                await self.esp.set_state("HAPPY", sub)
+                if hasattr(self, "gui") and self.gui is not None:
+                    self.gui.update_face_state(emo="HAPPY", sub=sub, mouth=0)
+                return
             await self.esp.set_state("IDLE")
             if hasattr(self, "gui") and self.gui is not None:
                 self.gui.update_face_state(emo="IDLE", mouth=0)
@@ -827,6 +864,114 @@ class PiCompanionHub:
                         return {"ok": False, "error": f"Unknown firmware_action: {fw_act}"}
                     applied["firmware"] = fw_res
                     return {"ok": bool(fw_res.get("ok", False)), "applied": applied, "firmware": fw_res}
+
+                spixi_act = str(args.get("spixi_action") or "").strip().lower()
+                if spixi_act:
+                    await self.sync_quixi_contacts()
+                    contact_query = str(
+                        args.get("contact_name")
+                        or args.get("contact")
+                        or args.get("address")
+                        or ""
+                    ).strip()
+
+                    if spixi_act in ("list", "list_contacts", "contacts"):
+                        contacts_list = [
+                            {"address": a, "nickname": n or self.get_contact_display_name(a)}
+                            for a, n in self.trusted_contacts.items()
+                        ]
+                        spixi_res = {
+                            "ok": True,
+                            "action": "list_contacts",
+                            "contacts": contacts_list,
+                            "trusted_contacts": dict(self.trusted_contacts),
+                        }
+                        applied["spixi"] = spixi_res
+                        return {"ok": True, "applied": applied, "spixi": spixi_res}
+
+                    if spixi_act in ("hangup", "end", "stop"):
+                        prev_contact = self.voip.current_contact
+                        await self.voip.hangup_call()
+                        spixi_res = {
+                            "ok": True,
+                            "action": "hangup",
+                            "ended_contact": prev_contact,
+                        }
+                        applied["spixi"] = spixi_res
+                        return {"ok": True, "applied": applied, "spixi": spixi_res}
+
+                    if spixi_act in ("add", "add_contact"):
+                        addr_arg = str(args.get("address") or contact_query).strip()
+                        nick_arg = str(args.get("nickname") or args.get("contact_name") or "").strip()
+                        if not addr_arg:
+                            return {"ok": False, "error": "Missing Spixi contact address to add"}
+                        self.add_trusted_friend(addr_arg, nick_arg if nick_arg != addr_arg else "")
+                        try:
+                            await self.quixi.add_contact(addr_arg)
+                        except Exception:
+                            pass
+                        spixi_res = {
+                            "ok": True,
+                            "action": "add_contact",
+                            "address": addr_arg,
+                            "nickname": self.trusted_contacts.get(addr_arg, ""),
+                        }
+                        applied["spixi"] = spixi_res
+                        return {"ok": True, "applied": applied, "spixi": spixi_res}
+
+                    resolved = self.resolve_spixi_contact(contact_query)
+                    if not resolved:
+                        available = [
+                            f"{n} ({a[:10]}..)" if n else a
+                            for a, n in self.trusted_contacts.items()
+                        ]
+                        return {
+                            "ok": False,
+                            "error": f"Spixi contact '{contact_query}' not found",
+                            "available_contacts": available,
+                        }
+                    target_addr, display_name = resolved
+
+                    if spixi_act in ("call", "dial"):
+                        self.add_trusted_friend(target_addr, display_name if display_name != target_addr else "")
+                        try:
+                            sid = await self.voip.initiate_call(target_addr, force=True)
+                        except Exception as exc:
+                            return {"ok": False, "error": f"Failed to start Spixi call to {display_name}: {exc}"}
+                        dial_sub = f"Calling: {display_name}..."
+                        await self.esp.set_debug(quixi="ONLINE", voip="FRIEND", bt_spk="OK")
+                        await self.esp.set_state("HAPPY", dial_sub)
+                        if hasattr(self, "gui") and self.gui is not None:
+                            self.gui.update_face_state(emo="HAPPY", sub=dial_sub, mouth=0)
+                        spixi_res = {
+                            "ok": True,
+                            "action": "call",
+                            "contact_name": display_name,
+                            "address": target_addr,
+                            "session_id": sid.hex(),
+                        }
+                        applied["spixi"] = spixi_res
+                        return {"ok": True, "applied": applied, "spixi": spixi_res}
+
+                    if spixi_act in ("message", "chat", "send_message"):
+                        msg_text = str(args.get("spixi_message") or args.get("message") or "").strip()
+                        if not msg_text:
+                            return {"ok": False, "error": "Missing 'spixi_message' text"}
+                        try:
+                            await self.quixi.send_chat_message(target_addr, msg_text)
+                        except Exception as exc:
+                            return {"ok": False, "error": f"Failed to send Spixi message to {display_name}: {exc}"}
+                        spixi_res = {
+                            "ok": True,
+                            "action": "message",
+                            "contact_name": display_name,
+                            "address": target_addr,
+                            "message": msg_text,
+                        }
+                        applied["spixi"] = spixi_res
+                        return {"ok": True, "applied": applied, "spixi": spixi_res}
+
+                    return {"ok": False, "error": f"Unknown spixi_action: {spixi_act}"}
 
                 return {"ok": True, "applied": applied}
 

@@ -157,7 +157,8 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
             "name": "update_companion_settings",
             "description": (
                 "Update screen brightness, Bluetooth speaker volume, microphone capture mode (vad/ptt/duplex/wake), "
-                "BLE scanner toggle, sleep timeout, or inspect/reset/reflash the ESP32-S3 LCD firmware over USB."
+                "BLE scanner toggle, sleep timeout, inspect/reset/reflash the ESP32-S3 LCD firmware over USB, "
+                "or start/hang up/message/list Spixi friend voice calls and contacts on the Raspberry Pi QuIXI node."
             ),
             "parameters": {
                 "type": "object",
@@ -180,6 +181,22 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
                         "type": "string",
                         "description": "Optional expected SHA-256 hex digest of zephyr.bin before flashing.",
                     },
+                    "spixi_action": {
+                        "type": "string",
+                        "enum": ["call", "hangup", "message", "list_contacts", "add_contact"],
+                        "description": (
+                            "Start a Spixi VoIP voice call to a friend ('call'), end an active friend call ('hangup'), "
+                            "send a Spixi text message ('message'), list saved Spixi friends ('list_contacts'), or add a friend ('add_contact')."
+                        ),
+                    },
+                    "contact_name": {
+                        "type": "string",
+                        "description": "Nickname or Ixian wallet address of the Spixi contact to call or message (e.g. 'Alice').",
+                    },
+                    "spixi_message": {
+                        "type": "string",
+                        "description": "Text message body when spixi_action='message'.",
+                    },
                 },
             },
         },
@@ -197,7 +214,9 @@ def build_default_system_prompt(companion_name: str = "Tamagci") -> str:
         "Keep spoken replies concise, conversational, and natural for voice output (usually 1-3 short sentences). "
         "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags), "
         "interact with physical GPIO pins, QMI8658 motion/IMU sensors, and nearby BLE devices, "
-        "and inspect, hardware-reset, or reflash/update your ESP32-S3 LCD firmware via update_companion_settings."
+        "inspect, hardware-reset, or reflash/update your ESP32-S3 LCD firmware via update_companion_settings, "
+        "and start Spixi voice calls or send messages to the user's Spixi contacts by nickname via update_companion_settings "
+        "(e.g. spixi_action='call', contact_name='Alice')."
     )
 
 
