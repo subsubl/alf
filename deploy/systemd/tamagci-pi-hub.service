@@ -8,6 +8,14 @@ Type=simple
 User=pi
 SupplementaryGroups=dialout audio bluetooth
 Environment=XDG_RUNTIME_DIR=/run/user/%U
+Environment=OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 PYTHONUNBUFFERED=1 MALLOC_ARENA_MAX=2
+# Pi Zero 2 W (512 MB RAM, 4x Cortex-A53): keep the hub lean and let QuIXI/audio win under contention
+MemoryHigh=160M
+MemoryMax=220M
+CPUWeight=200
+Nice=-5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=4
 WorkingDirectory=/opt/tamagci
 ExecStart="/opt/tamagci/pi_hub/.venv/bin/python" "/opt/tamagci/pi_hub/main_hub.py"
 Restart=always

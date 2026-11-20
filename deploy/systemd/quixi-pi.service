@@ -7,6 +7,10 @@ Wants=network-online.target mosquitto.service
 Type=simple
 User=pi
 WorkingDirectory=/opt/quixi
+# Pi Zero 2 W (512 MB RAM): workstation GC off, small gen0 budget, conserve memory, skip PGO instrumentation
+Environment=DOTNET_gcServer=0 DOTNET_gcConcurrent=0 DOTNET_GCgen0size=0x400000 DOTNET_GCConserveMemory=7 DOTNET_TieredPGO=0 DOTNET_TC_QuickJitForLoops=1 DOTNET_ReadyToRun=1 DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 DOTNET_EnableDiagnostics=0
+MemoryHigh=240M
+MemoryMax=300M
 ExecStart="/opt/quixi/QuIXI" --config "/opt/quixi/ixian.cfg"
 Restart=always
 RestartSec=5

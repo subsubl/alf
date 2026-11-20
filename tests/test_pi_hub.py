@@ -483,6 +483,31 @@ class TestAudioSyncEngine(unittest.IsolatedAsyncioTestCase):
         out_v_rms = (sum(s * s for s in out_v) / 320) ** 0.5
         self.assertGreater(out_v_rms, in_v_rms * 1.8)
 
+    async def test_numpy_vectorized_dsp_matches_pure_python_reference(self) -> None:
+        """Pi Zero 2 W optimization: vectorized high-pass/NS/AGC must match the pure-Python reference."""
+        if not ase_mod._REAL_NUMPY:
+            self.skipTest("real NumPy not installed")
+        frames = [
+            struct.pack(
+                "<1600h",
+                *[int(6000 * math.sin(2 * math.pi * 300.0 * ((f * 1600 + i) / 16000.0))) + 900 for i in range(1600)],
+            )
+            for f in range(4)
+        ]
+        proc_np = ase_mod.AudioPreprocessor(16000, noise_suppression_level=2, auto_gain_dbfs=10)
+        proc_py = ase_mod.AudioPreprocessor(16000, noise_suppression_level=2, auto_gain_dbfs=10)
+        for frame in frames:
+            ase_mod._REAL_NUMPY = True
+            out_np = proc_np.process(frame)
+            ase_mod._REAL_NUMPY = False
+            try:
+                out_py = proc_py.process(frame)
+            finally:
+                ase_mod._REAL_NUMPY = True
+            a = struct.unpack("<1600h", out_np)
+            b = struct.unpack("<1600h", out_py)
+            self.assertLessEqual(max(abs(x - y) for x, y in zip(a, b)), 2)
+
     async def test_wyoming_vad_trigger_level_debounce_and_max_turn_cutoff(self) -> None:
         """Verify M-of-K VAD onset debounce rejects transient clicks and max_turn_seconds terminates runaway turns."""
         sent: list[bytes] = []

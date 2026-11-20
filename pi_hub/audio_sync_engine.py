@@ -25,6 +25,9 @@ try:
 except ImportError:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
+# True only for the genuine NumPy package (offline test stubs lack cumsum/power)
+_REAL_NUMPY: bool = bool(np is not None and hasattr(np, "cumsum") and hasattr(np, "power"))
+
 try:
     import sounddevice as sd
 except Exception:  # pragma: no cover
@@ -189,13 +192,8 @@ class AudioPreprocessor:
             except Exception:
                 pass
 
-        # 2. Pure-Python / NumPy DSP fallback (80Hz High-Pass + NS Gate + AGC)
-        arr = array("h")
-        arr.frombytes(pcm_bytes[:usable])
-        if sys.byteorder != "little":  # pragma: no cover
-            arr.byteswap()
-
-        n = len(arr)
+        # 2. NumPy-vectorized DSP (Raspberry Pi Zero 2 W friendly) or pure-Python fallback
+        n = usable // 2
         if n == 0:
             return pcm_bytes
 
@@ -203,23 +201,52 @@ class AudioPreprocessor:
         rc = 1.0 / (2.0 * math.pi * 80.0)
         dt = 1.0 / float(self.sample_rate)
         alpha = rc / (rc + dt)
-        prev_x = self._hp_prev_in
-        prev_y = self._hp_prev_out
-        filtered = [0.0] * n
-        sum_sq = 0.0
-        peak = 0.0
-        for i, x_int in enumerate(arr):
-            x = float(x_int)
-            y = alpha * (prev_y + x - prev_x)
-            prev_x = x
-            prev_y = y
-            filtered[i] = y
-            sum_sq += y * y
-            ay = abs(y)
-            if ay > peak:
-                peak = ay
-        self._hp_prev_in = prev_x
-        self._hp_prev_out = prev_y
+
+        if _REAL_NUMPY:
+            x = np.frombuffer(pcm_bytes, dtype="<i2", count=n).astype(np.float64)
+            # y[n] = alpha*y[n-1] + alpha*(x[n]-x[n-1]) solved in closed form per 512-sample block
+            d = np.empty(n, dtype=np.float64)
+            d[0] = x[0] - self._hp_prev_in
+            if n > 1:
+                d[1:] = x[1:] - x[:-1]
+            filt = np.empty(n, dtype=np.float64)
+            prev_y = self._hp_prev_out
+            block = 512
+            for start in range(0, n, block):
+                dk = d[start : start + block]
+                m = dk.shape[0]
+                k = np.arange(m, dtype=np.float64)
+                w = np.power(alpha, k)
+                seg = alpha * w * np.cumsum(dk / w) + (alpha * w) * prev_y
+                filt[start : start + m] = seg
+                prev_y = float(seg[-1])
+            self._hp_prev_in = float(x[-1])
+            self._hp_prev_out = prev_y
+            sum_sq = float(np.dot(filt, filt))
+            peak = float(np.max(np.abs(filt)))
+        else:
+            arr = array("h")
+            arr.frombytes(pcm_bytes[:usable])
+            if sys.byteorder != "little":  # pragma: no cover
+                arr.byteswap()
+            prev_x = self._hp_prev_in
+            prev_y = self._hp_prev_out
+            filt_list = [0.0] * n
+            sum_sq = 0.0
+            peak = 0.0
+            for i, x_int in enumerate(arr):
+                xv = float(x_int)
+                y = alpha * (prev_y + xv - prev_x)
+                prev_x = xv
+                prev_y = y
+                filt_list[i] = y
+                sum_sq += y * y
+                ay = abs(y)
+                if ay > peak:
+                    peak = ay
+            self._hp_prev_in = prev_x
+            self._hp_prev_out = prev_y
+            filt = filt_list  # type: ignore[assignment]
 
         rms = math.sqrt(sum_sq / n)
 
@@ -248,7 +275,10 @@ class AudioPreprocessor:
             target_gain = self._current_gain
 
         total_gain = ns_gain * target_gain
-        out_arr = array("h", (max(-32768, min(32767, int(v * total_gain))) for v in filtered))
+        if _REAL_NUMPY:
+            out_np = np.clip(filt * total_gain, -32768.0, 32767.0).astype("<i2")
+            return out_np.tobytes()
+        out_arr = array("h", (max(-32768, min(32767, int(v * total_gain))) for v in filt))
         if sys.byteorder != "little":  # pragma: no cover
             out_arr.byteswap()
         return out_arr.tobytes()

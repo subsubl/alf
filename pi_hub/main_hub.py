@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from common_ixian import QuIXIClient, QuIXIError, SpixiVoIPSessionManager
 from common_ixian.quixi_client import _extract_b64_bytes
-from pi_hub.audio_sync_engine import AudioSyncEngine
+from pi_hub.audio_sync_engine import _REAL_NUMPY, AudioSyncEngine, np
 from pi_hub.esp_firmware_updater import EspFirmwareUpdater
 from pi_hub.esp_serial_bridge import EspSerialBridge
 from pi_hub.pi_web_gui import PiWebGUI
@@ -157,6 +157,18 @@ class PiCompanionHub:
         self._superseded_chat_stream_ids: Deque[str] = collections.deque(maxlen=16)
         self._pi_dhcp_ip: str = "127.0.0.1"
         self._pi_ixian_address: str = ""
+        self._last_mouth_val: int = 0
+        self._last_mouth_ts: float = 0.0
+        self._last_net_push: tuple = ()
+        self._last_contacts_sync: float = 0.0
+        perf_cfg = cfg.get("performance") if isinstance(cfg.get("performance"), dict) else {}
+        # Background housekeeping cadence (Pi Zero 2 W: fewer REST/serial round-trips)
+        self._housekeeping_interval_s: float = max(
+            2.0, float(perf_cfg.get("housekeeping_interval_s", 30.0))
+        )
+        self._contacts_sync_interval_s: float = max(
+            5.0, float(perf_cfg.get("contacts_sync_interval_s", 90.0))
+        )
 
         web_cfg = cfg.get("web_ui") if isinstance(cfg.get("web_ui"), dict) else {}
         self.web_ui_enabled: bool = bool(web_cfg.get("enabled", True))
@@ -167,27 +179,35 @@ class PiCompanionHub:
             auth_token=web_cfg.get("auth_token"),
         )
 
-    async def refresh_and_push_network_info(self) -> Dict[str, str]:
-        """Discover Pi DHCP IPv4 and QuIXI primary wallet address and push them to the ESP32-S3 Network screen."""
-        self._pi_dhcp_ip = detect_local_dhcp_ip()
-        try:
-            w_res = await self.quixi.my_wallet()
-            raw_w = w_res.get("result", w_res) if isinstance(w_res, dict) else w_res
-            if isinstance(raw_w, dict) and raw_w:
-                first_key = next(iter(raw_w.keys()))
-                if first_key and first_key not in ("result", "error"):
-                    self._pi_ixian_address = str(first_key).strip()
-            elif isinstance(raw_w, list) and raw_w:
-                self._pi_ixian_address = str(raw_w[0]).strip()
-            elif isinstance(raw_w, str) and raw_w.strip():
-                self._pi_ixian_address = raw_w.strip()
-        except Exception:
-            pass
+    async def refresh_and_push_network_info(self, force: bool = True) -> Dict[str, str]:
+        """Discover Pi DHCP IPv4 and QuIXI primary wallet address and push them to the ESP32-S3 Network screen.
 
-        await self.esp.set_net_info(
-            ip=self._pi_dhcp_ip,
-            ixi=self._pi_ixian_address or None,
-        )
+        Periodic housekeeping passes ``force=False``: the wallet is only re-queried until it is known and the
+        serial push is skipped when nothing changed (saves REST + USB traffic on the Pi Zero 2 W).
+        """
+        self._pi_dhcp_ip = detect_local_dhcp_ip()
+        if force or not self._pi_ixian_address:
+            try:
+                w_res = await self.quixi.my_wallet()
+                raw_w = w_res.get("result", w_res) if isinstance(w_res, dict) else w_res
+                if isinstance(raw_w, dict) and raw_w:
+                    first_key = next(iter(raw_w.keys()))
+                    if first_key and first_key not in ("result", "error"):
+                        self._pi_ixian_address = str(first_key).strip()
+                elif isinstance(raw_w, list) and raw_w:
+                    self._pi_ixian_address = str(raw_w[0]).strip()
+                elif isinstance(raw_w, str) and raw_w.strip():
+                    self._pi_ixian_address = raw_w.strip()
+            except Exception:
+                pass
+
+        net_key = (self._pi_dhcp_ip, self._pi_ixian_address)
+        if force or net_key != self._last_net_push:
+            await self.esp.set_net_info(
+                ip=self._pi_dhcp_ip,
+                ixi=self._pi_ixian_address or None,
+            )
+            self._last_net_push = net_key
         net_snapshot = {
             "ip": self._pi_dhcp_ip,
             "ixi": self._pi_ixian_address,
@@ -223,15 +243,22 @@ class PiCompanionHub:
 
         try:
             while True:
-                await self.refresh_and_push_network_info()
-                await self.sync_quixi_contacts()
+                await self.refresh_and_push_network_info(force=False)
+                now_mono = time.monotonic()
+                if now_mono - self._last_contacts_sync >= self._contacts_sync_interval_s:
+                    self._last_contacts_sync = now_mono
+                    await self.sync_quixi_contacts()
                 # Re-attempt call setup if not currently connected
                 if not self.voip.is_in_call and self._is_valid_server_address():
                     try:
                         await self.voip.initiate_call(self.server_address)
                     except (QuIXIError, Exception):
                         pass
-                await asyncio.sleep(10.0)
+                # Poll quickly only while the AI Server session needs to be re-established
+                needs_redial = not self.voip.is_in_call and self._is_valid_server_address()
+                await asyncio.sleep(
+                    min(10.0, self._housekeeping_interval_s) if needs_redial else self._housekeeping_interval_s
+                )
         finally:
             await self.gui.stop()
             await self.audio.stop()
@@ -494,8 +521,12 @@ class PiCompanionHub:
         if len(data) < 2:
             return 0
         count = min(len(data) // 2, 640)
-        samples = struct.unpack(f"<{count}h", data[: count * 2])
-        rms = (sum(s * s for s in samples) / count) ** 0.5
+        if _REAL_NUMPY and np is not None:
+            s = np.frombuffer(data, dtype="<i2", count=count).astype(np.float32)
+            rms = float(np.sqrt(np.dot(s, s) / count))
+        else:
+            samples = struct.unpack(f"<{count}h", data[: count * 2])
+            rms = (sum(v * v for v in samples) / count) ** 0.5
         if rms < 120:
             return 0
         return max(10, min(100, int(rms / 65.0)))
@@ -507,6 +538,16 @@ class PiCompanionHub:
         self.audio.feed_tts_audio(data)
         if self.is_in_friend_call:
             mouth_val = self._estimate_pcm16_mouth_openness(data)
+            # Throttle serial/WebSocket traffic: skip near-identical values within 60 ms
+            now = time.monotonic()
+            if (
+                mouth_val != 0
+                and abs(mouth_val - self._last_mouth_val) < 6
+                and (now - self._last_mouth_ts) < 0.06
+            ):
+                return
+            self._last_mouth_val = mouth_val
+            self._last_mouth_ts = now
             await self.esp.set_mouth(mouth_val)
             if hasattr(self, "gui") and self.gui is not None:
                 self.gui.update_face_state(mouth=mouth_val)

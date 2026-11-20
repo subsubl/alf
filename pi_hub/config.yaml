@@ -41,3 +41,7 @@ web_ui:
   host: 127.0.0.1             # Bind address (use 0.0.0.0 with auth_token for LAN access)
   port: 8082                  # HTTP + WebSocket port
   auth_token: null            # Optional bearer token required for /api/* when non-empty
+
+performance:
+  housekeeping_interval_s: 30.0     # Pi Zero 2 W: network/wallet/redial housekeeping cadence (fast 10s redial while AI Server call is down)
+  contacts_sync_interval_s: 90.0    # How often to auto-sync QuIXI /contacts into trusted_contacts

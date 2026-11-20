@@ -119,6 +119,11 @@ if [[ "${TAMAGCI_IMAGE_BUILD:-0}" != "1" ]]; then
     ${SUDO} systemctl daemon-reload
 fi
 
+if [[ "${TAMAGCI_SKIP_TUNING:-0}" != "1" ]]; then
+    echo "[extra] Applying Raspberry Pi Zero 2 W performance tuning (zram, sysctl, journald, Wi-Fi power-save)..."
+    bash "${REPO_DIR}/deploy/tune_pi_zero2w.sh" || echo "Warning: Pi Zero 2 W tuning step failed (non-fatal)."
+fi
+
 echo ""
 echo "Raspberry Pi Zero 2 W setup complete. Next steps:"
 echo "  1. Place the QuIXI binary at ${QUIXI_DIR}/QuIXI and set walletPassword in ${QUIXI_DIR}/ixian.cfg."
