@@ -562,16 +562,32 @@ class TestServerWebGUIAndOpenAIBridge(unittest.IsolatedAsyncioTestCase):
         self.assertIn("***", settings["llm_api_key_masked"])
         self.assertNotIn("supersecretkey", json.dumps(settings))
 
-        # 3. Runtime settings update
+        # 3. Runtime settings update (including server-side QuIXI & MQTT settings)
         code, updated = await gui.handle_api_request(
             "POST",
             "/api/settings",
-            body={"llm_model": "gpt-4.1-mini", "tts_voice": "nova", "companion_name": "Alf"},
+            body={
+                "llm_model": "gpt-4.1-mini",
+                "tts_voice": "nova",
+                "companion_name": "Alf",
+                "quixi_rest_url": "http://10.0.0.5:8001/",
+                "mqtt_host": "10.0.0.5",
+                "mqtt_port": 1884,
+                "mqtt_username": "quixi_srv",
+                "mqtt_password": "supermqttpassword123",
+            },
             headers=auth_hdr,
         )
         self.assertEqual(code, 200)
         self.assertEqual(svc.brain.model, "gpt-4.1-mini")
         self.assertEqual(svc.speech.tts_voice, "nova")
+        self.assertEqual(svc.quixi.rest_url, "http://10.0.0.5:8001")
+        self.assertEqual(svc.quixi.mqtt_host, "10.0.0.5")
+        self.assertEqual(svc.quixi.mqtt_port, 1884)
+        self.assertEqual(updated["mqtt_host"], "10.0.0.5")
+        self.assertEqual(updated["mqtt_port"], 1884)
+        self.assertIn("***", updated["mqtt_password_masked"])
+        self.assertNotIn("supermqttpassword123", json.dumps(updated))
 
         # 4. Personas / Modelfiles selection and custom persona creation
         code, p_list = await gui.handle_api_request("GET", "/api/personas", headers=auth_hdr)

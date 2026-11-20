@@ -332,14 +332,21 @@ class ServerWebGUI:
     def get_masked_settings(self) -> Dict[str, Any]:
         brain = getattr(self.service, "brain", None)
         speech = getattr(self.service, "speech", None)
+        quixi = getattr(self.service, "quixi", None)
         llm_client = getattr(brain, "client", None)
         stt_client = getattr(speech, "stt_client", None)
         tts_client = getattr(speech, "tts_client", None)
+        mqtt_pw = getattr(quixi, "mqtt_password", None) or os.getenv("MQTT_PASSWORD", "")
         return {
             "ok": True,
             "companion_name": getattr(brain, "companion_name", "Alf"),
             "system_prompt": getattr(brain, "system_prompt", ""),
             "pi_ixian_address": getattr(self.service, "pi_address", ""),
+            "quixi_rest_url": str(getattr(quixi, "rest_url", "") or os.getenv("QUIXI_REST_URL", "http://127.0.0.1:8001")),
+            "mqtt_host": str(getattr(quixi, "mqtt_host", "") or os.getenv("MQTT_HOST", "127.0.0.1")),
+            "mqtt_port": int(getattr(quixi, "mqtt_port", 0) or os.getenv("MQTT_PORT", "1883") or 1883),
+            "mqtt_username": str(getattr(quixi, "mqtt_username", "") or os.getenv("MQTT_USERNAME", "")),
+            "mqtt_password_masked": mask_secret(mqtt_pw),
             "llm_base_url": str(getattr(llm_client, "base_url", "") or os.getenv("LLM_BASE_URL", "")),
             "llm_api_key_masked": mask_secret(
                 getattr(llm_client, "api_key", None) or os.getenv("LLM_API_KEY", "")
@@ -361,8 +368,25 @@ class ServerWebGUI:
     def apply_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         brain = getattr(self.service, "brain", None)
         speech = getattr(self.service, "speech", None)
+        quixi = getattr(self.service, "quixi", None)
         if "pi_ixian_address" in payload and payload["pi_ixian_address"] is not None:
             self.service.pi_address = str(payload["pi_ixian_address"]).strip()
+        if quixi is not None:
+            if "quixi_rest_url" in payload and payload["quixi_rest_url"]:
+                quixi.rest_url = str(payload["quixi_rest_url"]).strip().rstrip("/")
+            if "mqtt_host" in payload and payload["mqtt_host"]:
+                quixi.mqtt_host = str(payload["mqtt_host"]).strip()
+            if "mqtt_port" in payload and payload["mqtt_port"] not in (None, ""):
+                try:
+                    quixi.mqtt_port = max(1, min(65535, int(payload["mqtt_port"])))
+                except (TypeError, ValueError):
+                    pass
+            if "mqtt_username" in payload and payload["mqtt_username"] is not None:
+                quixi.mqtt_username = str(payload["mqtt_username"]).strip() or None
+            if "mqtt_password" in payload and payload["mqtt_password"]:
+                raw_mpw = str(payload["mqtt_password"]).strip()
+                if "***" not in raw_mpw:
+                    quixi.mqtt_password = raw_mpw
         if brain is not None:
             if "llm_model" in payload and payload["llm_model"]:
                 brain.model = str(payload["llm_model"]).strip()
@@ -1148,6 +1172,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <span>Pi Wallet</span>
         <input type="text" id="cfgPiAddr" style="width:130px" />
       </div>
+      <div class="ctrl-row">
+        <span>QuIXI URL</span>
+        <input type="text" id="cfgQuixiUrl" style="width:130px" />
+      </div>
+      <div class="ctrl-row">
+        <span>MQTT Host</span>
+        <input type="text" id="cfgMqttHost" style="width:130px" />
+      </div>
+      <div class="ctrl-row">
+        <span>MQTT Port</span>
+        <input type="text" id="cfgMqttPort" style="width:130px" />
+      </div>
       <button class="btn btn-primary" onclick="saveRuntimeSettings()">Apply Runtime Config</button>
     </div>
 
@@ -1302,6 +1338,9 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       document.getElementById("cfgLlmModel").value = cfg.llm_model || "";
       document.getElementById("cfgTtsVoice").value = cfg.tts_voice || "";
       document.getElementById("cfgPiAddr").value = cfg.pi_ixian_address || "";
+      document.getElementById("cfgQuixiUrl").value = cfg.quixi_rest_url || "http://127.0.0.1:8001";
+      document.getElementById("cfgMqttHost").value = cfg.mqtt_host || "127.0.0.1";
+      document.getElementById("cfgMqttPort").value = cfg.mqtt_port || 1883;
     }
   }
 
@@ -1442,7 +1481,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       body: JSON.stringify({
         llm_model: document.getElementById("cfgLlmModel").value,
         tts_voice: document.getElementById("cfgTtsVoice").value,
-        pi_ixian_address: document.getElementById("cfgPiAddr").value
+        pi_ixian_address: document.getElementById("cfgPiAddr").value,
+        quixi_rest_url: document.getElementById("cfgQuixiUrl").value,
+        mqtt_host: document.getElementById("cfgMqttHost").value,
+        mqtt_port: parseInt(document.getElementById("cfgMqttPort").value || "1883", 10)
       })
     });
     fetchStatus();
