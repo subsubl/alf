@@ -22,6 +22,7 @@ import uuid
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from server_agent.agent_router import ALLOWLIST_PINS, VALID_EMOTIONS, build_default_system_prompt
+from server_agent.mcp_server import MCP_TOOLS, AlfMCPServer
 
 logger = logging.getLogger("server_agent.web_gui")
 
@@ -126,6 +127,7 @@ class ServerWebGUI:
         # Connected real-time browser clients (WebSocket writers & SSE queues)
         self._ws_clients: Set[asyncio.StreamWriter] = set()
         self._sse_queues: Set[asyncio.Queue[Dict[str, Any]]] = set()
+        self.mcp = AlfMCPServer(self.service, self)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -586,6 +588,14 @@ class ServerWebGUI:
         # 9. OpenAI-Compatible /v1/chat/completions (non-streaming JSON path)
         if method == "POST" and route == "/v1/chat/completions":
             return await self._handle_openai_chat_completion_json(payload, hdrs)
+
+        # 10. Model Context Protocol (MCP) Server Endpoint
+        if method == "GET" and route == "/mcp/tools":
+            return 200, {"ok": True, "tools": MCP_TOOLS}
+
+        if method == "POST" and route == "/mcp":
+            resp = await self.mcp.handle_jsonrpc(payload)
+            return 200, resp
 
         return 404, {"ok": False, "error": f"Not found: {method} {route}"}
 
@@ -1187,11 +1197,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <button class="btn btn-primary" onclick="saveRuntimeSettings()">Apply Runtime Config</button>
     </div>
 
-    <div class="section-lbl">Open WebUI API Bridge</div>
+    <div class="section-lbl">Open WebUI &amp; MCP Bridge</div>
     <div class="kv-box">
       <div><b>Base URL:</b> /v1</div>
       <div><b>Models:</b> GET /v1/models</div>
       <div><b>Chat:</b> POST /v1/chat/completions</div>
+      <div><b>MCP:</b> POST /mcp (22 tools)</div>
     </div>
 
     <div style="margin-top:auto;display:flex;gap:8px;">

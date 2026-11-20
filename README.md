@@ -110,9 +110,9 @@ Configured via `WEB_UI_ENABLED=true`, `WEB_UI_HOST=127.0.0.1`, `WEB_UI_PORT=8080
 - **Live Companion Mirror & Chat (`/`, `/api/chat`, `/api/ws`)**: Real-time 240×240 face canvas synchronized with 20 Hz visemes, streaming chat with collapsible `<details>` hardware tool cards, and a **"Speak on Companion"** toggle.
 - **Workspace Personas (`/api/personas`)**: Switch between **`alf-companion`** (Playful Desk Companion), **`alf-engineer`** (Hardware Lab Assistant), **`alf-sentry`** (BLE & Motion Sentry), or create custom personas with custom system prompts and TTS voices.
 - **Remote Hardware Workbench (`/api/hardware/tool`, `/api/hardware/firmware`)**: Remotely toggle GPIOs, read `Vbat`, poll IMU, scan BLE, adjust brightness/volume/mic mode, or check/reset/reflash the ESP32-S3 LCD over Ixian P2P.
-- **External Open WebUI Integration (`/v1/models`, `/v1/chat/completions`)**:
-  - In **Open WebUI**, go to **Settings → Connections → OpenAI API** and add `http://<server-host>:8080/v1` (with `WEB_UI_TOKEN` as the API key if set).
-  - Select `alf-companion`, `alf-engineer`, or `alf-sentry` from the Open WebUI model dropdown to chat with Alf with full hardware tool-calling and streaming SSE responses.
+- **Open WebUI & MCP Bridge (`/v1/*`, `/mcp`)**:
+  - In **Open WebUI**, go to **Settings → Connections → OpenAI API** and add `http://<server-host>:8080/v1` (with `WEB_UI_TOKEN` as the API key if set), and select `alf-companion`, `alf-engineer`, or `alf-sentry`.
+  - **Model Context Protocol (MCP) Server (`server_agent/mcp_server.py`)**: Exposes all 22 companion functions (ESP32 LCD face/image/video streaming, GPIO, IMU, BLE, firmware, Spixi contacts/calls/messaging, chat, personas, and MQTT/server settings) over HTTP JSON-RPC 2.0 (`POST /mcp`, `GET /mcp/tools`) or stdio (`python -m server_agent.mcp_server`).
 
 ---
 

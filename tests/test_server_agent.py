@@ -800,6 +800,91 @@ class TestServerWebGUIAndOpenAIBridge(unittest.IsolatedAsyncioTestCase):
         finally:
             await gui.stop()
 
+    async def test_mcp_server_tools_and_jsonrpc_endpoints(self) -> None:
+        """Verify server-side MCP JSON-RPC 2.0 endpoint (/mcp) exposes and executes all companion tools."""
+        svc, quixi, bus = self._make_service()
+        gui = svc.gui
+        rpc_calls: list[tuple[str, dict]] = []
+
+        async def fake_pi_rpc(tool_name: str, args: dict) -> dict:
+            rpc_calls.append((tool_name, args))
+            return {"ok": True, "echo_tool": tool_name, "echo_args": args}
+
+        svc._call_pi_tool_rpc = fake_pi_rpc  # type: ignore[assignment]
+
+        # 1. initialize
+        code, init_res = await gui.handle_api_request(
+            "POST",
+            "/mcp",
+            body={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(init_res["result"]["serverInfo"]["name"], "alf-companion-mcp")
+
+        # 2. tools/list & GET /mcp/tools
+        code, list_res = await gui.handle_api_request(
+            "POST",
+            "/mcp",
+            body={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        )
+        self.assertEqual(code, 200)
+        tool_names = {t["name"] for t in list_res["result"]["tools"]}
+        for expected in (
+            "set_companion_emotion",
+            "display_lcd_image",
+            "stream_lcd_video",
+            "clear_lcd_media",
+            "gpio_configure_and_write",
+            "gpio_read_pin",
+            "scan_ble_environment",
+            "read_imu_motion",
+            "update_companion_settings",
+            "check_esp32_firmware",
+            "flash_esp32_firmware",
+            "reset_esp32_firmware",
+            "list_spixi_contacts",
+            "add_spixi_contact",
+            "call_spixi_contact",
+            "hangup_spixi_call",
+            "send_spixi_message",
+            "chat_with_companion",
+            "list_personas",
+            "select_persona",
+            "get_companion_status",
+            "update_server_settings",
+        ):
+            self.assertIn(expected, tool_names)
+
+        # 3. tools/call across LCD media, Spixi calls/messaging, firmware, and server settings
+        for call_id, t_name, t_args in (
+            (3, "display_lcd_image", {"image_url": "https://example.com/pic.png"}),
+            (4, "stream_lcd_video", {"video_url": "https://example.com/cam.mjpeg", "fps": 6, "duration_s": 5}),
+            (5, "clear_lcd_media", {}),
+            (6, "call_spixi_contact", {"contact_name": "Alice"}),
+            (7, "send_spixi_message", {"contact_name": "Alice", "message": "Hello via MCP!"}),
+            (8, "check_esp32_firmware", {}),
+            (9, "update_server_settings", {"mqtt_host": "10.0.0.9", "mqtt_port": 1885}),
+            (10, "list_personas", {}),
+        ):
+            c, r = await gui.handle_api_request(
+                "POST",
+                "/mcp",
+                body={
+                    "jsonrpc": "2.0",
+                    "id": call_id,
+                    "method": "tools/call",
+                    "params": {"name": t_name, "arguments": t_args},
+                },
+            )
+            self.assertEqual(c, 200)
+            self.assertFalse(r["result"]["isError"], f"MCP tool {t_name} failed: {r}")
+
+        self.assertEqual(svc.quixi.mqtt_host, "10.0.0.9")
+        self.assertEqual(svc.quixi.mqtt_port, 1885)
+        self.assertTrue(any(t == "set_companion_emotion" and a.get("display_mode") == "video" for t, a in rpc_calls))
+        self.assertTrue(any(t == "update_companion_settings" and a.get("spixi_action") == "call" for t, a in rpc_calls))
+        self.assertTrue(any(t == "update_companion_settings" and a.get("spixi_action") == "message" for t, a in rpc_calls))
+
 
 if __name__ == "__main__":
     unittest.main()
