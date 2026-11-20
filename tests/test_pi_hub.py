@@ -1189,6 +1189,98 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                     await gui.stop()
                     await hub.esp.stop()
 
+    async def test_esp32_firmware_updater_and_llm_reflash_tool(self) -> None:
+        """Verify EspFirmwareUpdater staging, magic/SHA-256 check, serial release/resume flash, and LLM tool integration."""
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hub, esp, bus, port = _make_hub_with_mocks(tmp_path)
+            fw_dir = tmp_path / "firmware"
+            executed_cmds: list[list[str]] = []
+            bridge_was_closed_during_flash = False
+
+            async def fake_esptool_runner(cmd: list[str]) -> tuple[int, str]:
+                nonlocal bridge_was_closed_during_flash
+                executed_cmds.append(cmd)
+                # Confirm EspSerialBridge released the serial port before running esptool!
+                bridge_was_closed_during_flash = not hub.esp._running and hub.esp._ser is None
+                return 0, "Wrote 512640 bytes at 0x00000000 in 5.2 seconds (effective 788.7 kbit/s)...\nHard resetting via RTS pin..."
+
+            hub.firmware.firmware_dir = fw_dir
+            hub.firmware._candidate_paths = [fw_dir / "zephyr.bin"]
+            hub.firmware._runner = fake_esptool_runner
+
+            with patch("pi_hub.esp_serial_bridge.serial.Serial", return_value=port):
+                await hub.esp.start()
+                try:
+                    # 1. Invalid magic byte (< 0xE9) is rejected on upload
+                    bad_b64 = base64.b64encode(b"\x00" * 64).decode("ascii")
+                    code, bad_up = await hub.gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/firmware/upload",
+                        body={"firmware_b64": bad_b64},
+                    )
+                    self.assertEqual(code, 400)
+                    self.assertIn("0xE9", bad_up["error"])
+
+                    # 2. Valid ESP32-S3 firmware image (0xE9 magic header) stages cleanly & writes .sha256
+                    valid_bin = b"\xE9" + b"\x01\x02\x30" + (b"\xAA\x55" * 1024)
+                    expected_sha = hashlib.sha256(valid_bin).hexdigest()
+                    valid_b64 = base64.b64encode(valid_bin).decode("ascii")
+
+                    code, up_res = await hub.gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/firmware/upload",
+                        body={"firmware_b64": valid_b64, "sha256": expected_sha, "filename": "zephyr.bin"},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertTrue(up_res["ok"])
+                    self.assertEqual(up_res["firmware"]["sha256"], expected_sha)
+
+                    # 3. SHA-256 mismatch is rejected before flashing
+                    code, bad_sha_flash = await hub.gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/firmware/flash",
+                        body={"sha256": "0" * 64},
+                    )
+                    self.assertEqual(code, 502)
+                    self.assertIn("SHA-256 mismatch", bad_sha_flash["error"])
+                    self.assertEqual(len(executed_cmds), 0)
+
+                    # 4. LLM tool call `update_companion_settings(firmware_action='check')`
+                    chk_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"firmware_action": "check"},
+                    )
+                    self.assertTrue(chk_res["ok"])
+                    self.assertTrue(chk_res["firmware"]["ready_to_flash"])
+                    self.assertEqual(chk_res["firmware"]["firmware"]["sha256"], expected_sha)
+
+                    # 5. LLM tool call `update_companion_settings(firmware_action='flash')`
+                    # Releases serial port -> runs esptool -> resumes serial port @ 921600 -> verifies post-flash ping!
+                    flash_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"firmware_action": "flash", "firmware_sha256": expected_sha},
+                    )
+                    self.assertTrue(flash_res["ok"])
+                    self.assertTrue(bridge_was_closed_during_flash)
+                    self.assertEqual(len(executed_cmds), 1)
+                    self.assertIn("esp32s3", executed_cmds[0])
+                    self.assertIn("write_flash", executed_cmds[0])
+                    self.assertEqual(flash_res["firmware"]["post_flash_ping"]["ok"], 1)
+                    self.assertTrue(hub.esp._running)
+
+                    # 6. LLM tool call `update_companion_settings(firmware_action='reset')`
+                    rst_res = await hub._run_single_tool(
+                        "update_companion_settings",
+                        {"firmware_action": "reset"},
+                    )
+                    self.assertTrue(rst_res["ok"])
+                    self.assertEqual(rst_res["firmware"]["ping"]["ok"], 1)
+                finally:
+                    await hub.esp.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

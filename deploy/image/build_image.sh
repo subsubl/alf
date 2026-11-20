@@ -59,6 +59,13 @@ tar -C "${REPO_DIR}" \
     --exclude='quixi-linux-arm64' --exclude='QuIXI' --exclude='scratch' --exclude='build' \
     --exclude='__pycache__' --exclude='.venv' --exclude='.mypy_cache' --exclude='.pytest_cache' \
     -cf - . | tar -C "${MNT}/opt/tamagci" -xf -
+mkdir -p "${MNT}/opt/tamagci/firmware" "${MNT}/opt/tamagci/esp32_face_os"
+if [[ -d "${REPO_DIR}/firmware" ]]; then
+    cp -a "${REPO_DIR}/firmware/." "${MNT}/opt/tamagci/firmware/"
+fi
+if [[ -f "${REPO_DIR}/esp32_face_os/flash_pi.sh" ]]; then
+    install -m 0755 "${REPO_DIR}/esp32_face_os/flash_pi.sh" "${MNT}/opt/tamagci/esp32_face_os/flash_pi.sh"
+fi
 cp -a "${QUIXI_SRC}/." "${MNT}/opt/quixi/"
 chmod 0755 "${MNT}/opt/quixi/QuIXI"
 

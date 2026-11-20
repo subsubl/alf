@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from common_ixian import QuIXIClient, QuIXIError, SpixiVoIPSessionManager
 from common_ixian.quixi_client import _extract_b64_bytes
 from pi_hub.audio_sync_engine import AudioSyncEngine
+from pi_hub.esp_firmware_updater import EspFirmwareUpdater
 from pi_hub.esp_serial_bridge import EspSerialBridge
 from pi_hub.pi_web_gui import PiWebGUI
 
@@ -53,6 +54,7 @@ class PiCompanionHub:
             port=ser_cfg["port"],
             baudrate=int(ser_cfg.get("baudrate", 921600)),
         )
+        self.firmware = EspFirmwareUpdater(self.esp)
         self.quixi = QuIXIClient(
             rest_url=q_cfg["rest_url"],
             mqtt_host=q_cfg["mqtt_host"],
@@ -541,7 +543,7 @@ class PiCompanionHub:
             if tool == "read_imu_motion":
                 return await self.esp.request({"t": "imu_get"})
 
-            if tool == "update_companion_settings":
+            if tool in ("update_companion_settings", "flash_esp32_firmware"):
                 applied: Dict[str, Any] = {}
                 cfg_kwargs: Dict[str, Any] = {}
                 if "brightness" in args and args["brightness"] is not None:
@@ -557,10 +559,40 @@ class PiCompanionHub:
                     self.audio.set_mic_mode(str(args["mic_mode"]))
                     cfg_kwargs["mode"] = self.audio.mic_mode
                     applied["mic_mode"] = self.audio.mic_mode
+                if "ble_enabled" in args and args["ble_enabled"] is not None:
+                    ble_en = 1 if args["ble_enabled"] else 0
+                    cfg_kwargs["ble_en"] = ble_en
+                    applied["ble_enabled"] = bool(ble_en)
+                if "sleep_timeout_s" in args and args["sleep_timeout_s"] is not None:
+                    sleep_s = int(args["sleep_timeout_s"])
+                    cfg_kwargs["sleep_s"] = sleep_s
+                    applied["sleep_timeout_s"] = sleep_s
                 if cfg_kwargs:
                     esp_res = await self.esp.set_cfg(**cfg_kwargs, wait_res=True)
                     if esp_res.get("ok") != 1:
                         return {"ok": False, "error": esp_res.get("error", "ESP cfg failed"), "applied": applied}
+
+                fw_act = str(
+                    args.get("firmware_action")
+                    or ("flash" if tool == "flash_esp32_firmware" else "")
+                ).strip().lower()
+                if fw_act:
+                    fw_src = args.get("firmware_source")
+                    fw_sha = args.get("firmware_sha256")
+                    if fw_act == "check":
+                        fw_res = self.firmware.check_firmware(fw_src)
+                    elif fw_act == "reset":
+                        fw_res = await self.firmware.reset_esp32()
+                    elif fw_act in ("flash", "update", "reflash"):
+                        fw_res = await self.firmware.flash_firmware(
+                            source=str(fw_src) if fw_src is not None else None,
+                            expected_sha256=str(fw_sha) if fw_sha is not None else None,
+                        )
+                    else:
+                        return {"ok": False, "error": f"Unknown firmware_action: {fw_act}"}
+                    applied["firmware"] = fw_res
+                    return {"ok": bool(fw_res.get("ok", False)), "applied": applied, "firmware": fw_res}
+
                 return {"ok": True, "applied": applied}
 
             return {"ok": False, "error": f"Unknown tool: {tool}"}

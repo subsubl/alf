@@ -60,6 +60,35 @@ class EspSerialBridge:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.5)
 
+    async def pause_for_flash(self) -> bool:
+        """Temporarily release the serial port so esptool can flash the ESP32-S3 over USB."""
+        was_running = self._running
+        if was_running:
+            await self.stop()
+        return was_running
+
+    async def resume_after_flash(self, should_restart: bool = True) -> None:
+        """Re-acquire the serial port at 921600 baud after esptool completes."""
+        if should_restart and not self._running:
+            await self.start()
+            await asyncio.sleep(0.05)
+
+    async def hardware_reset(self) -> Dict[str, Any]:
+        """Pulse CH343 DTR/RTS to reboot the ESP32-S3 and verify post-boot ping."""
+        with self._tx_lock:
+            ser = self._ser
+            if ser and getattr(ser, "is_open", False):
+                try:
+                    ser.dtr = False
+                    ser.rts = True
+                    time.sleep(0.08)
+                    ser.rts = False
+                except Exception as exc:
+                    logger.warning("DTR/RTS pulse failed: %s", exc)
+        await asyncio.sleep(0.15)
+        res = await self.request({"t": "ping"}, timeout=2.5)
+        return {"ok": res.get("ok") == 1, "action": "reset", "ping": res}
+
     def _io_loop(self) -> None:
         while self._running:
             try:

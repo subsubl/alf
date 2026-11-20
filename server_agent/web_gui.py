@@ -515,6 +515,20 @@ class ServerWebGUI:
             entry = self.record_tool_execution(tool_name, args, res, duration_ms=dur_ms)
             return 200, {"ok": True, "tool": tool_name, "result": res, "entry": entry}
 
+        # 6b. Remote ESP32-S3 Firmware Check / Reset / Reflash via Pi Hub
+        if method == "POST" and route == "/api/hardware/firmware":
+            fw_act = str(payload.get("action") or payload.get("firmware_action") or "check").strip().lower()
+            rpc_args: Dict[str, Any] = {"firmware_action": fw_act}
+            if payload.get("source") or payload.get("firmware_source"):
+                rpc_args["firmware_source"] = str(payload.get("source") or payload.get("firmware_source"))
+            if payload.get("sha256") or payload.get("firmware_sha256"):
+                rpc_args["firmware_sha256"] = str(payload.get("sha256") or payload.get("firmware_sha256"))
+            t0 = time.monotonic()
+            res = await self.service._call_pi_tool_rpc("update_companion_settings", rpc_args)
+            dur_ms = int((time.monotonic() - t0) * 1000)
+            entry = self.record_tool_execution("update_companion_settings", rpc_args, res, duration_ms=dur_ms)
+            return 200, {"ok": bool(res.get("ok", False)), "action": fw_act, "result": res, "entry": entry}
+
         # 7. Interactive Web Chat Turn (with optional physical companion speech output)
         if method == "POST" and route == "/api/chat":
             user_text = str(payload.get("message") or payload.get("prompt") or "").strip()
@@ -1225,6 +1239,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
       <div class="kv-box" id="bleBox">Click "Scan BLE" to list nearby advertisers.</div>
     </div>
+
+    <div class="card">
+      <div class="ctrl-row">
+        <h3>ESP32-S3 LCD Firmware</h3>
+        <button class="btn" onclick="remoteFirmwareAction('check')">Check</button>
+      </div>
+      <div class="ctrl-row">
+        <button class="btn btn-primary" style="flex:1" onclick="remoteFirmwareAction('flash')">Reflash ESP32-S3</button>
+        <button class="btn" onclick="remoteFirmwareAction('reset')">Reset</button>
+      </div>
+      <div class="kv-box" id="fwBox">Remote firmware check, reset, or USB esptool reflash via Pi Hub.</div>
+    </div>
   </aside>
 
 <script>
@@ -1392,6 +1418,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   async function scanBle() {
     const r = await invokeTool("scan_ble_environment", {});
     document.getElementById("bleBox").textContent = JSON.stringify(r.ble || r, null, 2);
+  }
+
+  async function remoteFirmwareAction(action) {
+    document.getElementById("fwBox").textContent = "Running remote ESP32 firmware action: " + action + "...";
+    const r = await api("/api/hardware/firmware", {
+      method: "POST",
+      body: JSON.stringify({ action })
+    });
+    document.getElementById("fwBox").textContent = JSON.stringify(r.result || r, null, 2);
   }
 
   async function pushCompanionSettings() {

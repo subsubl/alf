@@ -57,7 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: ShellCheck
-        run: shellcheck --severity=warning deploy/*.sh deploy/image/*.sh
+        run: shellcheck --severity=warning deploy/*.sh deploy/image/*.sh esp32_face_os/*.sh
 
   firmware:
     name: Firmware build (Zephyr 3.7 LTS, ESP32-S3)

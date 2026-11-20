@@ -667,6 +667,58 @@ class PiWebGUI:
             await self.hub.esp.send(dict(cmd))
             return 200, {"ok": True, "sent": cmd}
 
+        if method == "GET" and route == "/api/esp32/firmware":
+            fw_upd = getattr(self.hub, "firmware", None)
+            if fw_upd is None:
+                return 500, {"ok": False, "error": "Firmware updater not initialized"}
+            source = query.get("source", "").strip() or None
+            return 200, fw_upd.check_firmware(source)
+
+        if method == "POST" and route == "/api/esp32/firmware/upload":
+            fw_upd = getattr(self.hub, "firmware", None)
+            if fw_upd is None:
+                return 500, {"ok": False, "error": "Firmware updater not initialized"}
+            b64_data = str(payload.get("firmware_b64") or payload.get("data_b64") or "").strip()
+            if not b64_data:
+                return 400, {"ok": False, "error": "Missing 'firmware_b64'"}
+            try:
+                raw_fw = base64.b64decode(b64_data)
+            except Exception as exc:
+                return 400, {"ok": False, "error": f"Invalid base64 payload: {exc}"}
+            exp_sha = str(payload.get("sha256") or "").strip() or None
+            fname = str(payload.get("filename") or "zephyr.bin").strip()
+            res = fw_upd.stage_firmware(raw_fw, expected_sha256=exp_sha, filename=fname)
+            if not res.get("ok"):
+                return 400, res
+            self.broadcast_event("esp32_firmware_staged", res)
+            return 200, res
+
+        if method == "POST" and route == "/api/esp32/firmware/flash":
+            fw_upd = getattr(self.hub, "firmware", None)
+            if fw_upd is None:
+                return 500, {"ok": False, "error": "Firmware updater not initialized"}
+            source = str(payload.get("source") or "").strip() or None
+            exp_sha = str(payload.get("sha256") or "").strip() or None
+            baud = int(payload.get("baudrate", 921600))
+            offset = str(payload.get("flash_offset", "0x0"))
+            self.broadcast_event("esp32_flash_started", {"source": source, "baudrate": baud})
+            res = await fw_upd.flash_firmware(
+                source=source,
+                expected_sha256=exp_sha,
+                baudrate=baud,
+                flash_offset=offset,
+            )
+            self.broadcast_event("esp32_flash_completed", res)
+            return (200 if res.get("ok") else 502), res
+
+        if method == "POST" and route == "/api/esp32/firmware/reset":
+            fw_upd = getattr(self.hub, "firmware", None)
+            if fw_upd is None:
+                return 500, {"ok": False, "error": "Firmware updater not initialized"}
+            res = await fw_upd.reset_esp32()
+            self.broadcast_event("esp32_reset", res)
+            return 200, res
+
         # --------------------------------------------------------------
         # 4. Audio / Wyoming-Satellite Controls
         # --------------------------------------------------------------
@@ -1213,6 +1265,22 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <div class="mono-box" id="espSerialBox">ESP32 serial responses & events...</div>
       </section>
+
+      <section class="card">
+        <div class="card-hdr">
+          <h2>10 · ESP32-S3 LCD Firmware Updater & Reflash</h2>
+          <button class="btn" onclick="checkEspFirmware()">Check Firmware</button>
+        </div>
+        <div class="row">
+          <input type="file" id="fwFileInput" accept=".bin" style="font-size:0.75rem;flex:1;" />
+          <button class="btn" onclick="uploadEspFirmware()">Stage .bin</button>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" onclick="flashEspFirmware()">Reflash ESP32-S3 LCD</button>
+          <button class="btn" onclick="resetEsp32()">Hardware Reset ESP32</button>
+        </div>
+        <div class="mono-box" id="espFirmwareBox">Click "Check Firmware" to inspect staged zephyr.bin & esptool.</div>
+      </section>
     </div>
   </div>
 
@@ -1464,6 +1532,38 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
     try { cmd = JSON.parse(document.getElementById("rawSerialInput").value); } catch (e) { return; }
     const r = await api("/api/esp32/raw", { method: "POST", body: JSON.stringify({ cmd, wait_res: true }) });
     document.getElementById("espSerialBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function checkEspFirmware() {
+    const r = await api("/api/esp32/firmware");
+    document.getElementById("espFirmwareBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function uploadEspFirmware() {
+    const inp = document.getElementById("fwFileInput");
+    if (!inp.files || !inp.files[0]) return;
+    const file = inp.files[0];
+    const buf = await file.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binStr = "";
+    for (let i = 0; i < bytes.byteLength; i++) binStr += String.fromCharCode(bytes[i]);
+    const b64 = btoa(binStr);
+    const r = await api("/api/esp32/firmware/upload", {
+      method: "POST",
+      body: JSON.stringify({ filename: file.name, firmware_b64: b64 })
+    });
+    document.getElementById("espFirmwareBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function flashEspFirmware() {
+    document.getElementById("espFirmwareBox").textContent = "Flashing ESP32-S3 LCD via esptool (releasing serial port)...";
+    const r = await api("/api/esp32/firmware/flash", { method: "POST", body: "{}" });
+    document.getElementById("espFirmwareBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function resetEsp32() {
+    const r = await api("/api/esp32/firmware/reset", { method: "POST", body: "{}" });
+    document.getElementById("espFirmwareBox").textContent = JSON.stringify(r, null, 2);
   }
 
   function connectWS() {

@@ -66,6 +66,18 @@ jobs:
           name: quixi-linux-arm64
           path: quixi-linux-arm64
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: esp32_face_os-firmware
+          path: firmware
+
+      - name: Compute staged ESP32 firmware SHA-256
+        run: |
+          if [ -f firmware/zephyr.bin ]; then
+            (cd firmware && sha256sum zephyr.bin > zephyr.bin.sha256)
+            ls -lh firmware/
+          fi
+
       - name: Install image tooling
         run: |
           sudo apt-get update

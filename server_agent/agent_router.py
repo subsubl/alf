@@ -155,13 +155,31 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_companion_settings",
-            "description": "Update screen brightness, Bluetooth speaker volume, or microphone capture mode (vad/ptt/duplex/wake).",
+            "description": (
+                "Update screen brightness, Bluetooth speaker volume, microphone capture mode (vad/ptt/duplex/wake), "
+                "BLE scanner toggle, sleep timeout, or inspect/reset/reflash the ESP32-S3 LCD firmware over USB."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "brightness": {"type": "integer", "minimum": 10, "maximum": 100},
                     "volume": {"type": "integer", "minimum": 0, "maximum": 100},
                     "mic_mode": {"type": "string", "enum": ["vad", "ptt", "duplex", "wake"]},
+                    "ble_enabled": {"type": "boolean"},
+                    "sleep_timeout_s": {"type": "integer", "enum": [0, 30, 120]},
+                    "firmware_action": {
+                        "type": "string",
+                        "enum": ["check", "flash", "reset"],
+                        "description": "Inspect staged ESP32 firmware ('check'), reflash ESP32-S3 LCD over USB ('flash'), or hardware-reset ESP32-S3 ('reset').",
+                    },
+                    "firmware_source": {
+                        "type": "string",
+                        "description": "Optional firmware path, HTTPS URL, or 'latest' staged zephyr.bin when firmware_action='flash'.",
+                    },
+                    "firmware_sha256": {
+                        "type": "string",
+                        "description": "Optional expected SHA-256 hex digest of zephyr.bin before flashing.",
+                    },
                 },
             },
         },
@@ -177,9 +195,9 @@ def build_default_system_prompt(companion_name: str = "Tamagci") -> str:
         f"You are {companion_name}, an embodied AI companion running inside a round Waveshare ESP32-S3 "
         "face display tethered via USB to a Raspberry Pi Zero 2 W and Bluetooth speaker/microphone. "
         "Keep spoken replies concise, conversational, and natural for voice output (usually 1-3 short sentences). "
-        "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags) "
-        "and interact with physical GPIO pins, QMI8658 motion/IMU sensors, "
-        "and nearby BLE devices using your tools."
+        "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags), "
+        "interact with physical GPIO pins, QMI8658 motion/IMU sensors, and nearby BLE devices, "
+        "and inspect, hardware-reset, or reflash/update your ESP32-S3 LCD firmware via update_companion_settings."
     )
 
 

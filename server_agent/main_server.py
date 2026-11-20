@@ -413,9 +413,17 @@ class ServerCompanionService:
         rpc_payload = json.dumps(
             {"kind": "tool_call", "id": req_id, "tool": tool_name, "args": args}
         )
+        is_flash = (
+            tool_name == "flash_esp32_firmware"
+            or (
+                isinstance(args, dict)
+                and str(args.get("firmware_action", "")).strip().lower() in ("flash", "update", "reflash")
+            )
+        )
+        rpc_timeout = 90.0 if is_flash else 8.0
         try:
             await self.quixi.send_app_data(target, rpc_payload, protocol_id=AGENT_PROTOCOL_ID)
-            return await asyncio.wait_for(fut, timeout=8.0)
+            return await asyncio.wait_for(fut, timeout=rpc_timeout)
         except asyncio.TimeoutError:
             return {"ok": False, "error": "Hardware RPC timed out"}
         except Exception as exc:
