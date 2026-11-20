@@ -48,7 +48,7 @@ static lv_obj_t *cfg_sleep_lbl;
 static lv_obj_t *cfg_ble_sw;
 static int cfg_bright = 100;
 static int cfg_vol = 75;
-static int cfg_mic_mode = 0; /* 0="vad", 1="ptt", 2="duplex" */
+static int cfg_mic_mode = 0; /* 0="vad", 1="ptt", 2="duplex", 3="wake" */
 static bool cfg_ble_en = true;
 static const int sleep_options_s[3] = { 30, 120, 0 };
 static int cfg_sleep_idx = 1; /* default: 2m (120s) */
@@ -300,6 +300,7 @@ static const char *mic_mode_str_from_idx(int idx)
 {
     if (idx == 1) return "ptt";
     if (idx == 2) return "duplex";
+    if (idx == 3) return "wake";
     return "vad";
 }
 
@@ -307,6 +308,7 @@ static const char *mic_mode_label_from_idx(int idx)
 {
     if (idx == 1) return "Mic: Tap PTT";
     if (idx == 2) return "Mic: Duplex";
+    if (idx == 3) return "Mic: Wake Word";
     return "Mic: Auto VAD";
 }
 
@@ -371,7 +373,7 @@ static void vol_up_cb(lv_event_t *e)
 static void mic_mode_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
-    cfg_mic_mode = (cfg_mic_mode + 1) % 3;
+    cfg_mic_mode = (cfg_mic_mode + 1) % 4;
     lv_label_set_text(cfg_mic_lbl, mic_mode_label_from_idx(cfg_mic_mode));
     emit_cfg();
 }
@@ -1177,6 +1179,7 @@ void ui_set_mic_mode_str(const char *mode)
     if (!mode) return;
     if (strcasecmp(mode, "ptt") == 0) cfg_mic_mode = 1;
     else if (strcasecmp(mode, "duplex") == 0) cfg_mic_mode = 2;
+    else if (strcasecmp(mode, "wake") == 0) cfg_mic_mode = 3;
     else cfg_mic_mode = 0;
 
     if (cfg_mic_lbl) {

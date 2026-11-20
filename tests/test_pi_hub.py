@@ -6,6 +6,7 @@ import asyncio
 import base64
 import inspect
 import json
+import math
 import struct
 import sys
 import tempfile
@@ -449,6 +450,213 @@ class TestAudioSyncEngine(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.03)
         self.assertEqual(len(sent_ptt), 1)
         self.assertEqual(sent_ptt[0], loud)
+
+    async def test_wyoming_dsp_preprocessor_ns_and_agc(self) -> None:
+        """Verify AudioPreprocessor high-pass rumble removal, noise suppression, and auto-gain."""
+        proc_off = ase_mod.AudioPreprocessor(16000, noise_suppression_level=0, auto_gain_dbfs=0)
+        self.assertFalse(proc_off.enabled)
+        raw_quiet = struct.pack("<320h", *([90] * 320))
+        self.assertEqual(proc_off.process(raw_quiet), raw_quiet)
+
+        # Noise suppression (level 4) attenuates low-amplitude background hum
+        proc_ns = ase_mod.AudioPreprocessor(16000, noise_suppression_level=4, auto_gain_dbfs=0)
+        self.assertTrue(proc_ns.enabled)
+        hum = struct.pack("<320h", *([120 if i % 2 == 0 else -120 for i in range(320)]))
+        out_ns = proc_ns.process(hum)
+        in_samples = struct.unpack("<320h", hum)
+        out_samples = struct.unpack("<320h", out_ns)
+        in_rms = (sum(s * s for s in in_samples) / 320) ** 0.5
+        out_rms = (sum(s * s for s in out_samples) / 320) ** 0.5
+        self.assertLess(out_rms, in_rms * 0.7)
+
+        # Auto-gain (18 dBFS) boosts quiet speech signal without clipping
+        proc_agc = ase_mod.AudioPreprocessor(16000, noise_suppression_level=0, auto_gain_dbfs=18)
+        voice_quiet = struct.pack(
+            "<320h",
+            *([int(500 * math.sin(2.0 * math.pi * 400.0 * (i / 16000.0))) for i in range(320)]),
+        )
+        for _ in range(3):
+            boosted = proc_agc.process(voice_quiet)
+        in_v = struct.unpack("<320h", voice_quiet)
+        out_v = struct.unpack("<320h", boosted)
+        in_v_rms = (sum(s * s for s in in_v) / 320) ** 0.5
+        out_v_rms = (sum(s * s for s in out_v) / 320) ** 0.5
+        self.assertGreater(out_v_rms, in_v_rms * 1.8)
+
+    async def test_wyoming_vad_trigger_level_debounce_and_max_turn_cutoff(self) -> None:
+        """Verify M-of-K VAD onset debounce rejects transient clicks and max_turn_seconds terminates runaway turns."""
+        sent: list[bytes] = []
+        states: list[bool] = []
+
+        async def send_frame(b: bytes) -> bool:
+            sent.append(b)
+            return True
+
+        async def on_state(active: bool) -> None:
+            states.append(active)
+
+        eng = AudioSyncEngine(
+            sample_rate=16000,
+            frame_ms=20,
+            vad_silence_ms=500,
+            vad_trigger_level=3,
+            max_turn_seconds=0.08,
+            send_audio_frame=send_frame,
+            on_speech_state=on_state,
+        )
+        eng._vad = None
+        eng._loop = asyncio.get_running_loop()
+        eng._running = True
+
+        quiet = b"\x00" * 640
+        loud = struct.pack("<320h", *([4000] * 320))
+
+        # 2 loud frames followed by silence must NOT trigger a turn when vad_trigger_level=3
+        eng._on_mic_audio(loud, 320, None, None)
+        eng._on_mic_audio(loud, 320, None, None)
+        eng._on_mic_audio(quiet, 320, None, None)
+        await asyncio.sleep(0.02)
+        self.assertFalse(eng.is_capturing)
+        self.assertEqual(states, [])
+
+        # 3 consecutive loud frames trigger turn and flush pre-roll
+        eng._on_mic_audio(loud, 320, None, None)
+        eng._on_mic_audio(loud, 320, None, None)
+        eng._on_mic_audio(loud, 320, None, None)
+        await asyncio.sleep(0.02)
+        self.assertTrue(eng.is_capturing)
+        self.assertEqual(states, [True])
+        self.assertGreaterEqual(len(sent), 3)
+
+        # Wait past max_turn_seconds (80ms) while still feeding loud audio -> safety cutoff finishes turn
+        await asyncio.sleep(0.10)
+        eng._on_mic_audio(loud, 320, None, None)
+        await asyncio.sleep(0.03)
+        self.assertFalse(eng.is_capturing)
+        self.assertEqual(states, [True, False])
+
+    async def test_wyoming_wake_word_refractory_earcons_and_followup_window(self) -> None:
+        """Verify 'wake' mic mode, refractory cooldown, local earcons, and post-TTS follow-up window."""
+        sent: list[bytes] = []
+        states: list[bool] = []
+        wakes: list[int] = []
+        wake_flag = False
+
+        async def send_frame(b: bytes) -> bool:
+            sent.append(b)
+            return True
+
+        async def on_state(active: bool) -> None:
+            states.append(active)
+
+        async def on_wake() -> None:
+            wakes.append(1)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            custom_wav = Path(tmp) / "awake.wav"
+            with ase_mod.wave.open(str(custom_wav), "wb") as wf:
+                wf.setnchannels(2)
+                wf.setsampwidth(2)
+                wf.setframerate(8000)
+                wf.writeframes(struct.pack("<8h", 1000, 1000, -1000, -1000, 500, 500, -500, -500))
+
+            eng = AudioSyncEngine(
+                sample_rate=16000,
+                frame_ms=20,
+                bt_latency_ms=0,
+                vad_silence_ms=60,
+                default_mic_mode="wake",
+                earcons_enabled=True,
+                awake_wav=custom_wav,
+                wake_refractory_ms=500,
+                followup_window_ms=400,
+                wake_detector_fn=lambda _pcm: wake_flag,
+                send_audio_frame=send_frame,
+                on_speech_state=on_state,
+                on_wake_detected=on_wake,
+            )
+            eng._vad = None
+            eng._loop = asyncio.get_running_loop()
+            eng._running = True
+
+            quiet = b"\x00" * 640
+            loud = struct.pack("<320h", *([4500] * 320))
+
+            # Speaking without wake word does not trigger in 'wake' mode
+            eng._on_mic_audio(loud, 320, None, None)
+            await asyncio.sleep(0.02)
+            self.assertFalse(eng.is_capturing)
+            self.assertEqual(wakes, [])
+
+            # Wake word fires -> turn starts, custom awake earcon queued, on_wake_detected called
+            wake_flag = True
+            eng._on_mic_audio(loud, 320, None, None)
+            wake_flag = False
+            await asyncio.sleep(0.03)
+            self.assertTrue(eng.is_capturing)
+            self.assertEqual(wakes, [1])
+            self.assertEqual(states, [True])
+            self.assertFalse(eng._play_queue.empty())
+
+            # Finish turn via silence -> 'done' earcon queued
+            await asyncio.sleep(0.08)
+            eng._on_mic_audio(quiet, 320, None, None)
+            await asyncio.sleep(0.03)
+            self.assertFalse(eng.is_capturing)
+            self.assertEqual(states, [True, False])
+
+            # Refractory period (500ms) prevents immediate wake re-trigger
+            wake_flag = True
+            eng._on_mic_audio(loud, 320, None, None)
+            wake_flag = False
+            await asyncio.sleep(0.02)
+            self.assertFalse(eng.is_capturing)
+            self.assertEqual(wakes, [1])
+
+            # After TTS finishes, follow-up conversation window arms automatically
+            eng.start_viseme_pacemaker([50])
+            assert eng._viseme_task is not None
+            await asyncio.wait_for(eng._viseme_task, timeout=1.0)
+            self.assertTrue(eng.is_in_followup_window)
+
+            # User replies during follow-up window without wake word -> starts turn via VAD!
+            eng._on_mic_audio(loud, 320, None, None)
+            await asyncio.sleep(0.03)
+            self.assertTrue(eng.is_capturing)
+            self.assertEqual(states, [True, False, True])
+
+    async def test_wyoming_bluetooth_stream_watchdog_auto_heal(self) -> None:
+        """Verify check_and_heal_streams recovers stalled or closed PortAudio streams."""
+        statuses: list[bool] = []
+
+        async def on_status(ok: bool) -> None:
+            statuses.append(ok)
+
+        eng = AudioSyncEngine(
+            sample_rate=16000,
+            stream_stall_timeout_s=2.0,
+            on_stream_status=on_status,
+        )
+        await eng.start()
+        try:
+            # Healthy stream -> no recovery triggered
+            now = time.monotonic()
+            eng._last_mic_rx_ts = now
+            self.assertFalse(await eng.check_and_heal_streams(now=now + 0.5))
+            self.assertEqual(eng.stream_recoveries, 0)
+
+            # Simulate Bluetooth mic stall beyond stream_stall_timeout_s (2.0s)
+            self.assertTrue(await eng.check_and_heal_streams(now=now + 3.0))
+            self.assertEqual(eng.stream_recoveries, 1)
+            self.assertEqual(statuses, [True])
+
+            # Simulate stream unexpectedly closed by OS audio daemon
+            eng._out_stream.closed = True
+            self.assertTrue(await eng.check_and_heal_streams(now=now + 3.5))
+            self.assertEqual(eng.stream_recoveries, 2)
+            self.assertEqual(statuses, [True, True])
+        finally:
+            await eng.stop()
 
 
 class TestPiCompanionHub(unittest.IsolatedAsyncioTestCase):

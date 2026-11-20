@@ -57,15 +57,18 @@ flowchart LR
 **Tier 1 — `esp32_face_os`**
 - 240×240 GC9A01 round display with a procedural vector face: 9 emotions (`IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `HAPPY`, `SAD`, `SURPRISED`, `SLEEPING`, `ALERT`), blinking, gaze, 20 Hz viseme lip-sync and rolling live subtitles.
 - Fast 4-step hardware rotation (0°/90°/180°/270° via panel MADCTL) driven by the IMU, with touch coordinates rotated to match.
-- Three screens (swipe or `<`/`>`): **Face** (tap = push-to-talk / barge-in), **Settings** (brightness, volume, mic mode `vad`/`ptt`/`duplex`, rotation mode, BLE toggle, sleep timeout), **Debug** (link status, IMU, BLE, GPIO, battery, heap).
+- Three screens (swipe or `<`/`>`): **Face** (tap = push-to-talk / barge-in), **Settings** (brightness, volume, mic mode `vad`/`ptt`/`duplex`/`wake`, rotation mode, BLE toggle, sleep timeout), **Debug** (link status, IMU, BLE, GPIO, battery, heap).
 - QMI8658 IMU on a dedicated 50 Hz thread: `shake`, `tilt`, `pickup`, `double_tap`.
 - BLE passive observer (32 entries, stale pruning).
 - Agent-controlled GPIO on allow-listed header pins (`15, 16, 17, 18, 21, 33, 34, 35, 36, 37`) plus battery ADC on `GPIO 1`; protected pins return `-EACCES`, bad arguments `-EINVAL`.
 - Clean NDJSON-over-USB protocol at 921600 baud with console/log output disabled so frames never interleave.
 
-**Tier 2 — `pi_hub`**
+**Tier 2 — `pi_hub` (Wyoming-Satellite-grade voice pipeline)**
 - Asyncio orchestrator bridging the ESP32-S3 serial link and the Spixi VoIP session.
-- Mic modes `vad`, `ptt`, `duplex`; touch and voice barge-in; Bluetooth latency compensation (`bt_latency_ms`).
+- Four mic modes: `vad` (auto voice activity), `ptt` (tap push-to-talk), `duplex` (full-duplex voice barge-in), and `wake` (on-device wake-word gating via `openWakeWord` / custom detector with refractory cooldown and a post-TTS **follow-up conversation window** for natural multi-turn dialogue).
+- WebRTC / DSP audio front-end (`AudioPreprocessor`): 80 Hz high-pass rumble filter, adaptive noise suppression (`mic_noise_suppression: 0..4`), and Automatic Gain Control (`mic_auto_gain_dbfs: 0..31`) before VAD/wake evaluation.
+- Smart VAD onset debounce (`vad_trigger_level` consecutive voiced frames to reject transient clicks while preserving the 300 ms pre-roll ring buffer) + `max_turn_seconds` runaway stream cutoff.
+- Instant zero-latency local earcon chimes (`awake`, `done`, `error` — built-in synthesized 16 kHz chimes or custom `.wav` files) and a Bluetooth PortAudio stream watchdog (`check_and_heal_streams`) that automatically recovers when a BT headset/speaker power-cycles.
 - Executes `tool_call` / `tool_batch` hardware RPCs from the agent against Tier 1.
 
 **Tier 3 — `server_agent`**

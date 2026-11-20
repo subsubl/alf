@@ -13,8 +13,22 @@ audio:
   sample_rate: 16000
   frame_ms: 100
   vad_aggressiveness: 2       # 0 (least) .. 3 (most aggressive)
+  vad_trigger_level: 3        # Consecutive voiced 20ms frames required to start a turn (debounces clicks)
   vad_silence_ms: 900         # Stop speech capture after 900ms silence
+  max_turn_seconds: 30.0      # Safety cutoff so background TV/radio cannot stream indefinitely
+  mic_noise_suppression: 2    # WebRTC / DSP noise suppression level: 0 (off) .. 4 (max)
+  mic_auto_gain_dbfs: 10      # Automatic Gain Control (AGC) boost in dBFS: 0 (off) .. 31 (max)
+  earcons_enabled: true       # Play instant local awake/done/error chimes (wyoming-satellite style)
+  awake_wav: null             # Optional custom WAV path for wake/listen chime (null = built-in synth)
+  done_wav: null              # Optional custom WAV path for end-of-turn chime (null = built-in synth)
+  error_wav: null             # Optional custom WAV path for error chime (null = built-in synth)
+  wake_word_model: hey_jarvis # openWakeWord model name when default_mic_mode is "wake"
+  wake_threshold: 0.5         # Wake word detection confidence threshold (0.05 .. 0.99)
+  wake_refractory_ms: 2000    # Minimum cooldown between wake word detections
+  followup_window_ms: 6000    # Stay awake for 6s of follow-up conversation after TTS finishes
+  stream_stall_timeout_s: 5.0 # Auto-heal PortAudio streams if BT mic callbacks stall
+  watchdog_interval_s: 2.0    # Background Bluetooth audio stream health check period
   bt_latency_ms: 150          # Sync offset so mouth & subtitles match Bluetooth speaker delay
-  default_mic_mode: vad       # "vad", "ptt", or "duplex"
+  default_mic_mode: vad       # "vad", "ptt", "duplex", or "wake"
   input_device: null          # Optional sounddevice index or name (null = system default PipeWire/Pulse)
   output_device: null

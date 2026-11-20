@@ -71,6 +71,21 @@ class PiCompanionHub:
             on_viseme=self._on_viseme_frame,
             on_playback_done=self._on_playback_done,
             on_barge_in=self._on_voice_barge_in,
+            vad_trigger_level=int(aud_cfg.get("vad_trigger_level", 1)),
+            max_turn_seconds=float(aud_cfg.get("max_turn_seconds", 30.0)),
+            noise_suppression_level=int(aud_cfg.get("mic_noise_suppression", 0)),
+            auto_gain_dbfs=int(aud_cfg.get("mic_auto_gain_dbfs", 0)),
+            earcons_enabled=bool(aud_cfg.get("earcons_enabled", False)),
+            awake_wav=aud_cfg.get("awake_wav"),
+            done_wav=aud_cfg.get("done_wav"),
+            error_wav=aud_cfg.get("error_wav"),
+            wake_word_model=str(aud_cfg.get("wake_word_model", "hey_jarvis")),
+            wake_threshold=float(aud_cfg.get("wake_threshold", 0.5)),
+            wake_refractory_ms=int(aud_cfg.get("wake_refractory_ms", 2000)),
+            followup_window_ms=int(aud_cfg.get("followup_window_ms", 0)),
+            stream_stall_timeout_s=float(aud_cfg.get("stream_stall_timeout_s", 5.0)),
+            watchdog_interval_s=float(aud_cfg.get("watchdog_interval_s", 0.0)),
+            on_stream_status=self._on_audio_stream_status,
         )
         self.voip = SpixiVoIPSessionManager(
             send_spixi_fn=self.quixi.send_spixi_message,
@@ -159,7 +174,12 @@ class PiCompanionHub:
 
     async def _on_voip_request_error(self, contact: str, sid: bytes, detail: str) -> None:
         logger.warning("VoIP request error from %s session=%s: %s", contact, sid.hex(), detail)
+        if self.audio.earcons_enabled:
+            self.audio.play_earcon("error")
         await self.esp.set_debug(quixi="ONLINE", voip="ERR")
+
+    async def _on_audio_stream_status(self, ok: bool) -> None:
+        await self.esp.set_debug(bt_spk="OK" if ok else "ERR")
 
     async def _send_mic_voip_frame(self, frame_bytes: bytes) -> bool:
         if self.voip.is_in_call:

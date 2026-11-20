@@ -155,13 +155,13 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "update_companion_settings",
-            "description": "Update screen brightness, Bluetooth speaker volume, or microphone capture mode (vad/ptt/duplex).",
+            "description": "Update screen brightness, Bluetooth speaker volume, or microphone capture mode (vad/ptt/duplex/wake).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "brightness": {"type": "integer", "minimum": 10, "maximum": 100},
                     "volume": {"type": "integer", "minimum": 0, "maximum": 100},
-                    "mic_mode": {"type": "string", "enum": ["vad", "ptt", "duplex"]},
+                    "mic_mode": {"type": "string", "enum": ["vad", "ptt", "duplex", "wake"]},
                 },
             },
         },
