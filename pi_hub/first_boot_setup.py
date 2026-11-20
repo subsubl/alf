@@ -27,6 +27,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import yaml
 
+from pi_hub.pi_system_config import (
+    PiSystemConfigManager,
+    RASPI_INTERFACE_KEYS,
+    default_cmd_runner as _default_cmd_runner,
+    parse_nmcli_wifi_scan,
+)
+
 logger = logging.getLogger("pi_hub.first_boot")
 
 DEFAULT_AP_SSID = "Alf-Setup"
@@ -120,6 +127,12 @@ class FirstBootAPPortal:
         self.hub_cfg_path = Path(hub_cfg_path)
         self._run_cmd: CmdRunnerFn = cmd_runner or _default_cmd_runner
         self.dry_run = bool(dry_run)
+        self.sys_cfg = PiSystemConfigManager(
+            wifi_iface=self.wifi_iface,
+            cmd_runner=self._run_cmd,
+            dry_run=self.dry_run,
+            use_sudo=False,
+        )
 
         self._server: Optional[asyncio.AbstractServer] = None
         self.bound_port: int = self.port
@@ -188,20 +201,7 @@ class FirstBootAPPortal:
         self.ap_active = False
 
     async def scan_wifi_networks(self) -> List[Dict[str, Any]]:
-        if self.dry_run:
-            return [
-                {"ssid": "HomeWiFi", "signal": 88, "security": "WPA2"},
-                {"ssid": "Studio-2.4G", "signal": 62, "security": "WPA2"},
-            ]
-        await self._run_cmd(
-            ["nmcli", "device", "wifi", "rescan", "ifname", self.wifi_iface], None
-        )
-        rc, out, _ = await self._run_cmd(
-            ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY", "device", "wifi", "list"], None
-        )
-        if rc != 0:
-            return []
-        return parse_nmcli_wifi_scan(out)
+        return await self.sys_cfg.scan_wifi_networks()
 
     # ------------------------------------------------------------------
     # Validation & Provisioning Execution
@@ -340,23 +340,42 @@ class FirstBootAPPortal:
         if not u_ok:
             return False, {"ok": False, "error": u_msg}
 
-        # 2. Optional (skippable): hostname, SSH, QuIXI walletPassword, server_ixian_address
+        # 2. Optional (skippable): hostname, SSH, raspi-config options, QuIXI walletPassword, server_ixian_address
         skipped: List[str] = []
         applied_optional: Dict[str, Any] = {}
 
+        raspi_payload: Dict[str, Any] = {}
         if hostname:
-            if not self.dry_run:
-                await self._run_cmd(["hostnamectl", "set-hostname", hostname], None)
-            applied_optional["hostname"] = hostname
+            raspi_payload["hostname"] = hostname
         else:
             skipped.append("hostname")
 
-        if enable_ssh:
-            if not self.dry_run:
-                await self._run_cmd(["systemctl", "enable", "--now", "ssh"], None)
-            applied_optional["ssh_enabled"] = True
+        if "enable_ssh" in payload or "ssh" in payload:
+            raspi_payload["ssh"] = bool(payload.get("ssh", payload.get("enable_ssh", True)))
         else:
             skipped.append("ssh")
+
+        for opt_key in (
+            "timezone",
+            "locale",
+            "keyboard",
+            "boot_behaviour",
+            "boot_wait_network",
+            "gpu_mem",
+            "expand_rootfs",
+            "interfaces",
+        ):
+            if payload.get(opt_key) not in (None, "", False):
+                raspi_payload[opt_key] = payload[opt_key]
+        for iface_key in RASPI_INTERFACE_KEYS:
+            if iface_key != "ssh" and iface_key in payload and payload[iface_key] is not None:
+                raspi_payload[iface_key] = bool(payload[iface_key])
+
+        if raspi_payload:
+            rc_res = await self.sys_cfg.apply_raspi_config(raspi_payload)
+            applied_optional["raspi_config"] = rc_res.get("applied", {})
+            if rc_res.get("errors"):
+                applied_optional["raspi_config_errors"] = rc_res["errors"]
 
         if wallet_pw:
             self._apply_optional_quixi_wallet_password(wallet_pw)
@@ -370,12 +389,25 @@ class FirstBootAPPortal:
         else:
             skipped.append("server_ixian_address")
 
-        # 3. Required: Wi-Fi connection (tears down AP)
+        # 3. Required: Wi-Fi connection (tears down AP) + optional Static IPv4
         w_ok, w_msg = await self._connect_wifi(wifi_ssid, wifi_password, wifi_country)
         if not w_ok:
             # Re-enable AP so the user is not locked out if Wi-Fi credentials were wrong
             await self.start_ap_mode()
             return False, {"ok": False, "error": w_msg}
+
+        ipv4_mode = str(payload.get("ipv4_mode") or "").strip().lower()
+        if ipv4_mode in ("static", "manual"):
+            ip_ok, ip_msg = await self.sys_cfg.configure_ipv4(
+                connection_name=wifi_ssid,
+                mode="manual",
+                ip_cidr=str(payload.get("ipv4_address") or ""),
+                gateway=str(payload.get("ipv4_gateway") or ""),
+                dns=str(payload.get("ipv4_dns") or ""),
+            )
+            applied_optional["ipv4"] = {"ok": ip_ok, "detail": ip_msg}
+        else:
+            skipped.append("static_ipv4")
 
         # 4. Write sentinel (no plaintext passwords!)
         self.sentinel_path.parent.mkdir(parents=True, exist_ok=True)
@@ -603,8 +635,61 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <div class="hdr"><h2>3 · Companion & QuIXI</h2><span class="tag opt">Optional · Skippable</span></div>
+    <div class="hdr"><h2>3 · Network IPv4, raspi-config &amp; QuIXI</h2><span class="tag opt">Optional · Skippable</span></div>
     <div><label>Hostname (optional)</label><input id="hostname" type="text" placeholder="tamagci (skip to keep default)" /></div>
+    <div><label>IPv4 Mode</label>
+      <select id="ipv4Mode" onchange="toggleStaticIp()">
+        <option value="auto">DHCP (Automatic)</option>
+        <option value="manual">Static IPv4</option>
+      </select>
+    </div>
+    <div id="staticIpFields" style="display:none;flex-direction:column;gap:8px;">
+      <input id="ipv4Addr" type="text" placeholder="Static IP/CIDR (e.g. 192.168.1.50/24)" />
+      <div class="row">
+        <input id="ipv4Gw" type="text" placeholder="Gateway (192.168.1.1)" />
+        <input id="ipv4Dns" type="text" placeholder="DNS (1.1.1.1 8.8.8.8)" />
+      </div>
+    </div>
+    <details>
+      <summary style="cursor:pointer;font-size:0.84rem;color:#38bdf8;">raspi-config Options (Interfaces, Localization, GPU, Boot)</summary>
+      <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px;">
+        <div class="row">
+          <input id="rcTimezone" type="text" placeholder="Timezone (e.g. Europe/Berlin)" />
+          <input id="rcLocale" type="text" placeholder="Locale (e.g. en_US.UTF-8)" />
+        </div>
+        <div class="row">
+          <input id="rcKeyboard" type="text" placeholder="Keyboard (e.g. us, de)" />
+          <select id="rcGpuMem">
+            <option value="">GPU Mem (default 16M)</option>
+            <option value="16">16 MB (Headless)</option>
+            <option value="32">32 MB</option>
+            <option value="64">64 MB</option>
+            <option value="128">128 MB</option>
+          </select>
+        </div>
+        <div class="row">
+          <select id="rcBootBeh">
+            <option value="">Boot Behaviour (skip)</option>
+            <option value="B1">B1 · Console</option>
+            <option value="B2">B2 · Console Autologin</option>
+            <option value="B3">B3 · Desktop</option>
+            <option value="B4">B4 · Desktop Autologin</option>
+          </select>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;font-size:0.8rem;">
+          <label><input type="checkbox" id="rcSsh" checked /> SSH</label>
+          <label><input type="checkbox" id="rcVnc" /> VNC</label>
+          <label><input type="checkbox" id="rcSpi" /> SPI</label>
+          <label><input type="checkbox" id="rcI2c" /> I2C</label>
+          <label><input type="checkbox" id="rcSerialHw" /> Serial HW</label>
+          <label><input type="checkbox" id="rcSerialCons" /> Serial Console</label>
+          <label><input type="checkbox" id="rcOnewire" /> 1-Wire</label>
+          <label><input type="checkbox" id="rcRgpio" /> Remote GPIO</label>
+          <label><input type="checkbox" id="rcBootWait" /> Wait for Network</label>
+          <label><input type="checkbox" id="rcExpandFs" /> Expand Rootfs</label>
+        </div>
+      </div>
+    </details>
     <div><label>QuIXI Wallet Password (optional)</label><input id="walletPw" type="password" placeholder="Skip to set later at :8082" /></div>
     <div><label>AI Server Ixian Address (optional)</label><input id="serverAddr" type="text" placeholder="Skip to pair later at :8082" /></div>
   </div>
@@ -614,6 +699,10 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
   <div id="statusMsg"></div>
 
 <script>
+  function toggleStaticIp() {
+    document.getElementById("staticIpFields").style.display =
+      document.getElementById("ipv4Mode").value === "manual" ? "flex" : "none";
+  }
   async function scanWifi() {
     const sel = document.getElementById("wifiSelect");
     sel.innerHTML = "<option>Scanning...</option>";
@@ -641,6 +730,25 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
       wifi_password: document.getElementById("wifiPass").value,
       wifi_country: document.getElementById("wifiCountry").value.trim(),
       hostname: skipOptional ? "" : document.getElementById("hostname").value.trim(),
+      ipv4_mode: skipOptional ? "auto" : document.getElementById("ipv4Mode").value,
+      ipv4_address: skipOptional ? "" : document.getElementById("ipv4Addr").value.trim(),
+      ipv4_gateway: skipOptional ? "" : document.getElementById("ipv4Gw").value.trim(),
+      ipv4_dns: skipOptional ? "" : document.getElementById("ipv4Dns").value.trim(),
+      timezone: skipOptional ? "" : document.getElementById("rcTimezone").value.trim(),
+      locale: skipOptional ? "" : document.getElementById("rcLocale").value.trim(),
+      keyboard: skipOptional ? "" : document.getElementById("rcKeyboard").value.trim(),
+      gpu_mem: skipOptional ? "" : document.getElementById("rcGpuMem").value,
+      boot_behaviour: skipOptional ? "" : document.getElementById("rcBootBeh").value,
+      ssh: skipOptional ? true : document.getElementById("rcSsh").checked,
+      vnc: skipOptional ? null : document.getElementById("rcVnc").checked,
+      spi: skipOptional ? null : document.getElementById("rcSpi").checked,
+      i2c: skipOptional ? null : document.getElementById("rcI2c").checked,
+      serial_hw: skipOptional ? null : document.getElementById("rcSerialHw").checked,
+      serial_cons: skipOptional ? null : document.getElementById("rcSerialCons").checked,
+      onewire: skipOptional ? null : document.getElementById("rcOnewire").checked,
+      rgpio: skipOptional ? null : document.getElementById("rcRgpio").checked,
+      boot_wait_network: skipOptional ? null : document.getElementById("rcBootWait").checked,
+      expand_rootfs: skipOptional ? false : document.getElementById("rcExpandFs").checked,
       quixi_wallet_password: skipOptional ? "" : document.getElementById("walletPw").value.trim(),
       server_ixian_address: skipOptional ? "" : document.getElementById("serverAddr").value.trim(),
       enable_ssh: true

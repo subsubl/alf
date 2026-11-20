@@ -28,6 +28,7 @@ import uuid
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
 
 from common_ixian import QuIXIError
+from pi_hub.pi_system_config import PiSystemConfigManager
 
 logger = logging.getLogger("pi_hub.web_gui")
 
@@ -66,6 +67,7 @@ class PiWebGUI:
         self.ixian_cfg_path = Path(
             ixian_cfg_path or os.getenv("QUIXI_CFG_PATH", "/opt/quixi/ixian.cfg")
         )
+        self.sys_cfg = PiSystemConfigManager(use_sudo=True)
 
         self._server: Optional[asyncio.AbstractServer] = None
         self.bound_port: int = self.port
@@ -884,6 +886,61 @@ class PiWebGUI:
                 }
             return 400, {"ok": False, "error": f"Unknown audio action: {act}"}
 
+        # --------------------------------------------------------------
+        # 5. Raspberry Pi Network & raspi-config Settings
+        # --------------------------------------------------------------
+        if route == "/api/system/network":
+            if method == "GET":
+                net = await self.sys_cfg.get_network_status()
+                if query.get("scan") in ("1", "true", "yes"):
+                    net["networks"] = await self.sys_cfg.scan_wifi_networks()
+                return 200, net
+            if method == "POST":
+                act = str(payload.get("action") or "status").strip().lower()
+                if act == "scan":
+                    nets = await self.sys_cfg.scan_wifi_networks()
+                    return 200, {"ok": True, "networks": nets}
+                if act in ("connect", "connect_wifi"):
+                    ok, msg = await self.sys_cfg.connect_wifi(
+                        ssid=str(payload.get("ssid") or ""),
+                        password=str(payload.get("password") or ""),
+                        country=str(payload.get("country") or ""),
+                    )
+                    if ok and hasattr(self.hub, "refresh_and_push_network_info"):
+                        await self.hub.refresh_and_push_network_info(force=True)
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                if act in ("ipv4", "configure_ipv4"):
+                    ok, msg = await self.sys_cfg.configure_ipv4(
+                        connection_name=str(payload.get("connection") or ""),
+                        mode=str(payload.get("mode") or "auto"),
+                        ip_cidr=str(payload.get("ip_cidr") or payload.get("address") or ""),
+                        gateway=str(payload.get("gateway") or ""),
+                        dns=str(payload.get("dns") or ""),
+                    )
+                    if ok and hasattr(self.hub, "refresh_and_push_network_info"):
+                        await self.hub.refresh_and_push_network_info(force=True)
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                if act in ("forget", "delete"):
+                    ok, msg = await self.sys_cfg.forget_connection(
+                        str(payload.get("connection") or payload.get("name") or "")
+                    )
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                return 400, {"ok": False, "error": f"Unknown network action: {act}"}
+
+        if route == "/api/system/raspi-config":
+            if method == "GET":
+                state = await self.sys_cfg.get_raspi_config_state()
+                return 200, {"ok": True, **state}
+            if method == "POST":
+                res = await self.sys_cfg.apply_raspi_config(payload)
+                self.broadcast_event("raspi_config_updated", res)
+                return (200 if res.get("ok") else 400), res
+
+        if method == "POST" and route == "/api/system/power":
+            act = str(payload.get("action") or "").strip().lower()
+            ok, msg = await self.sys_cfg.power_action(act)
+            return (200 if ok else 400), {"ok": ok, "message": msg}
+
         return 404, {"ok": False, "error": f"Not found: {method} {route}"}
 
     # ------------------------------------------------------------------
@@ -1343,6 +1400,71 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <div class="mono-box" id="audioStatusBox"></div>
       </section>
+
+      <section class="card">
+        <div class="card-hdr">
+          <h2>11 · Raspberry Pi Network &amp; raspi-config</h2>
+          <button class="btn" onclick="refreshPiSystem()">Refresh</button>
+        </div>
+        <div class="row">
+          <select id="piWifiSelect" onchange="pickPiWifi()" style="flex:1;"><option value="">-- Wi-Fi Networks --</option></select>
+          <button class="btn" onclick="scanPiWifi()">Scan Wi-Fi</button>
+        </div>
+        <div class="row">
+          <input type="text" id="piWifiSsid" placeholder="Wi-Fi SSID" style="flex:1;" />
+          <input type="password" id="piWifiPass" placeholder="Wi-Fi Password" style="flex:1;" />
+          <button class="btn btn-primary" onclick="connectPiWifi()">Connect</button>
+        </div>
+        <div class="row">
+          <select id="piIpv4Mode" onchange="togglePiStaticIp()">
+            <option value="auto">IPv4: DHCP</option>
+            <option value="manual">IPv4: Static</option>
+          </select>
+          <input type="text" id="piIpv4Cidr" placeholder="192.168.1.50/24" style="flex:1;display:none;" />
+          <input type="text" id="piIpv4Gw" placeholder="Gateway" style="width:110px;display:none;" />
+          <input type="text" id="piIpv4Dns" placeholder="DNS" style="width:100px;display:none;" />
+          <button class="btn" onclick="applyPiIpv4()">Apply IP</button>
+        </div>
+        <div class="row">
+          <input type="text" id="piHostname" placeholder="Hostname (tamagci)" style="flex:1;" />
+          <input type="text" id="piWifiCountry" placeholder="Country (US)" maxlength="2" style="width:95px;" />
+          <input type="text" id="piTimezone" placeholder="Timezone (UTC)" style="flex:1;" />
+        </div>
+        <div class="row">
+          <input type="text" id="piLocale" placeholder="Locale (en_US.UTF-8)" style="flex:1;" />
+          <input type="text" id="piKeyboard" placeholder="Keymap (us)" style="width:100px;" />
+          <select id="piGpuMem">
+            <option value="">GPU Mem</option>
+            <option value="16">16M</option><option value="32">32M</option>
+            <option value="64">64M</option><option value="128">128M</option>
+          </select>
+        </div>
+        <div class="row">
+          <select id="piBootBeh" style="flex:1;">
+            <option value="">Boot Behaviour (unchanged)</option>
+            <option value="B1">B1 · Console</option><option value="B2">B2 · Console Autologin</option>
+            <option value="B3">B3 · Desktop</option><option value="B4">B4 · Desktop Autologin</option>
+          </select>
+          <label style="font-size:0.75rem;"><input type="checkbox" id="piBootWait" /> Wait Net</label>
+          <label style="font-size:0.75rem;"><input type="checkbox" id="piExpandFs" /> Expand FS</label>
+        </div>
+        <div class="gpio-grid" style="font-size:0.75rem;">
+          <label><input type="checkbox" id="piIfSsh" /> SSH</label>
+          <label><input type="checkbox" id="piIfVnc" /> VNC</label>
+          <label><input type="checkbox" id="piIfSpi" /> SPI</label>
+          <label><input type="checkbox" id="piIfI2c" /> I2C</label>
+          <label><input type="checkbox" id="piIfSerialHw" /> Serial HW</label>
+          <label><input type="checkbox" id="piIfSerialCons" /> Serial Console</label>
+          <label><input type="checkbox" id="piIfOnewire" /> 1-Wire</label>
+          <label><input type="checkbox" id="piIfRgpio" /> Remote GPIO</label>
+        </div>
+        <div class="row">
+          <button class="btn btn-primary" onclick="applyPiRaspiConfig()">Apply raspi-config</button>
+          <button class="btn" onclick="piPower('reboot')">Reboot Pi</button>
+          <button class="btn btn-danger" onclick="piPower('shutdown')">Shutdown</button>
+        </div>
+        <div class="mono-box" id="piSystemBox">Click "Refresh" to inspect Pi Network &amp; raspi-config state.</div>
+      </section>
     </div>
 
     <!-- COLUMN 3: ESP32-S3 Live Face Mirror, IMU, BLE Radar, GPIO & Serial -->
@@ -1755,6 +1877,98 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
   async function resetEsp32() {
     const r = await api("/api/esp32/firmware/reset", { method: "POST", body: "{}" });
     document.getElementById("espFirmwareBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  function togglePiStaticIp() {
+    const manual = document.getElementById("piIpv4Mode").value === "manual";
+    ["piIpv4Cidr", "piIpv4Gw", "piIpv4Dns"].forEach(id => {
+      document.getElementById(id).style.display = manual ? "inline-block" : "none";
+    });
+  }
+
+  async function refreshPiSystem() {
+    const [net, rc] = await Promise.all([api("/api/system/network"), api("/api/system/raspi-config")]);
+    if (rc.ok) {
+      if (rc.hostname) document.getElementById("piHostname").value = rc.hostname;
+      if (rc.wifi_country) document.getElementById("piWifiCountry").value = rc.wifi_country;
+      if (rc.timezone) document.getElementById("piTimezone").value = rc.timezone;
+      const ifs = rc.interfaces || {};
+      const map = {
+        ssh: "piIfSsh", vnc: "piIfVnc", spi: "piIfSpi", i2c: "piIfI2c",
+        serial_hw: "piIfSerialHw", serial_cons: "piIfSerialCons", onewire: "piIfOnewire", rgpio: "piIfRgpio"
+      };
+      Object.entries(map).forEach(([k, id]) => {
+        if (typeof ifs[k] === "boolean") document.getElementById(id).checked = ifs[k];
+      });
+    }
+    document.getElementById("piSystemBox").textContent = JSON.stringify({ network: net, raspi_config: rc }, null, 2);
+  }
+
+  async function scanPiWifi() {
+    const r = await api("/api/system/network", { method: "POST", body: JSON.stringify({ action: "scan" }) });
+    const sel = document.getElementById("piWifiSelect");
+    sel.innerHTML = '<option value="">-- Select Wi-Fi --</option>';
+    (r.networks || []).forEach(n => {
+      const o = document.createElement("option");
+      o.value = n.ssid;
+      o.textContent = `${n.ssid} (${n.signal}% · ${n.security})`;
+      sel.appendChild(o);
+    });
+  }
+
+  function pickPiWifi() {
+    const v = document.getElementById("piWifiSelect").value;
+    if (v) document.getElementById("piWifiSsid").value = v;
+  }
+
+  async function connectPiWifi() {
+    const ssid = document.getElementById("piWifiSsid").value.trim();
+    const password = document.getElementById("piWifiPass").value;
+    const country = document.getElementById("piWifiCountry").value.trim();
+    const r = await api("/api/system/network", {
+      method: "POST", body: JSON.stringify({ action: "connect_wifi", ssid, password, country })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function applyPiIpv4() {
+    const mode = document.getElementById("piIpv4Mode").value;
+    const ip_cidr = document.getElementById("piIpv4Cidr").value.trim();
+    const gateway = document.getElementById("piIpv4Gw").value.trim();
+    const dns = document.getElementById("piIpv4Dns").value.trim();
+    const r = await api("/api/system/network", {
+      method: "POST", body: JSON.stringify({ action: "configure_ipv4", mode, ip_cidr, gateway, dns })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function applyPiRaspiConfig() {
+    const body = {
+      hostname: document.getElementById("piHostname").value.trim(),
+      wifi_country: document.getElementById("piWifiCountry").value.trim(),
+      timezone: document.getElementById("piTimezone").value.trim(),
+      locale: document.getElementById("piLocale").value.trim(),
+      keyboard: document.getElementById("piKeyboard").value.trim(),
+      gpu_mem: document.getElementById("piGpuMem").value,
+      boot_behaviour: document.getElementById("piBootBeh").value,
+      boot_wait_network: document.getElementById("piBootWait").checked,
+      expand_rootfs: document.getElementById("piExpandFs").checked,
+      ssh: document.getElementById("piIfSsh").checked,
+      vnc: document.getElementById("piIfVnc").checked,
+      spi: document.getElementById("piIfSpi").checked,
+      i2c: document.getElementById("piIfI2c").checked,
+      serial_hw: document.getElementById("piIfSerialHw").checked,
+      serial_cons: document.getElementById("piIfSerialCons").checked,
+      onewire: document.getElementById("piIfOnewire").checked,
+      rgpio: document.getElementById("piIfRgpio").checked
+    };
+    const r = await api("/api/system/raspi-config", { method: "POST", body: JSON.stringify(body) });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function piPower(action) {
+    const r = await api("/api/system/power", { method: "POST", body: JSON.stringify({ action }) });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
   }
 
   function connectWS() {

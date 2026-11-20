@@ -63,6 +63,12 @@ elif command -v loginctl >/dev/null 2>&1; then
     ${SUDO} loginctl enable-linger "${TARGET_USER}" || true
 fi
 
+if [[ -d /etc/sudoers.d ]]; then
+    printf '%s ALL=(root) NOPASSWD: /usr/bin/nmcli, /usr/bin/raspi-config, /usr/bin/hostnamectl, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff\n' "${TARGET_USER}" \
+        | ${SUDO} tee /etc/sudoers.d/tamagci-system >/dev/null
+    ${SUDO} chmod 440 /etc/sudoers.d/tamagci-system
+fi
+
 echo "[4/6] Creating pi_hub virtual environment and installing Python requirements..."
 if [[ ! -w "${REPO_DIR}" ]] || [[ ! -w "${REPO_DIR}/pi_hub" ]]; then
     REPO_SUDO="${SUDO}"

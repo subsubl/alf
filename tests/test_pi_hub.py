@@ -1649,6 +1649,120 @@ class TestFirstBootAPSetupPortal(unittest.IsolatedAsyncioTestCase):
             finally:
                 await portal.stop()
 
+    async def test_pi_web_gui_network_and_all_raspi_config_options(self) -> None:
+        """Verify PiWebGUI network (Wi-Fi scan/connect, DHCP/static IPv4) and all raspi-config options."""
+        from pi_hub.pi_system_config import PiSystemConfigManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, esp, bus, port = _make_hub_with_mocks(Path(tmp))
+            gui = hub.gui
+            cmds: list[list[str]] = []
+
+            async def fake_sys_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+                cmds.append(cmd)
+                if cmd[:4] == ["nmcli", "-t", "-f", "GENERAL.CONNECTION,IP4.ADDRESS,IP4.GATEWAY,IP4.DNS"]:
+                    return (
+                        0,
+                        "GENERAL.CONNECTION:HomeWiFi\nIP4.ADDRESS[1]:192.168.1.42/24\nIP4.GATEWAY:192.168.1.1\nIP4.DNS[1]:1.1.1.1\n",
+                        "",
+                    )
+                if cmd[:4] == ["nmcli", "-t", "-f", "NAME,TYPE,DEVICE"]:
+                    return 0, "HomeWiFi:802-11-wireless:wlan0\n", ""
+                if cmd[:4] == ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY"]:
+                    return 0, "HomeWiFi:90:WPA2\nGuest:45:OPEN\n", ""
+                if cmd == ["hostname"]:
+                    return 0, "tamagci\n", ""
+                if cmd == ["raspi-config", "nonint", "get_wifi_country"]:
+                    return 0, "DE\n", ""
+                if cmd[:3] == ["raspi-config", "nonint", "get_ssh"]:
+                    return 0, "0\n", ""
+                if len(cmd) >= 3 and cmd[:2] == ["raspi-config", "nonint"] and cmd[2].startswith("get_"):
+                    return 0, "1\n", ""
+                return 0, "", ""
+
+            gui.sys_cfg = PiSystemConfigManager(cmd_runner=fake_sys_runner, dry_run=False, use_sudo=False)
+
+            # 1. GET /api/system/network?scan=1
+            code, net_res = await gui.handle_api_request("GET", "/api/system/network?scan=1")
+            self.assertEqual(code, 200)
+            self.assertEqual(net_res["active_connection"], "HomeWiFi")
+            self.assertEqual(net_res["ipv4_address"], "192.168.1.42/24")
+            self.assertEqual(net_res["networks"][0]["ssid"], "HomeWiFi")
+
+            # 2. Configure Static IPv4 and then revert to DHCP
+            code, static_res = await gui.handle_api_request(
+                "POST",
+                "/api/system/network",
+                body={
+                    "action": "configure_ipv4",
+                    "mode": "manual",
+                    "ip_cidr": "192.168.1.88/24",
+                    "gateway": "192.168.1.1",
+                    "dns": "1.1.1.1",
+                },
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(static_res["ok"])
+            self.assertTrue(any("192.168.1.88/24" in c and "manual" in c for c in cmds))
+
+            code, dhcp_res = await gui.handle_api_request(
+                "POST",
+                "/api/system/network",
+                body={"action": "configure_ipv4", "mode": "auto"},
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(any("auto" in c and "modify" in c for c in cmds))
+
+            # 3. GET /api/system/raspi-config
+            code, rc_get = await gui.handle_api_request("GET", "/api/system/raspi-config")
+            self.assertEqual(code, 200)
+            self.assertEqual(rc_get["hostname"], "tamagci")
+            self.assertEqual(rc_get["wifi_country"], "DE")
+            self.assertTrue(rc_get["interfaces"]["ssh"])
+            self.assertFalse(rc_get["interfaces"]["i2c"])
+
+            # 4. POST /api/system/raspi-config (all options)
+            code, rc_post = await gui.handle_api_request(
+                "POST",
+                "/api/system/raspi-config",
+                body={
+                    "hostname": "alf-pi",
+                    "wifi_country": "US",
+                    "timezone": "Europe/Berlin",
+                    "locale": "en_US.UTF-8",
+                    "keyboard": "de",
+                    "boot_behaviour": "B2",
+                    "boot_wait_network": True,
+                    "gpu_mem": 16,
+                    "expand_rootfs": True,
+                    "ssh": True,
+                    "vnc": False,
+                    "spi": True,
+                    "i2c": True,
+                    "serial_hw": True,
+                    "serial_cons": False,
+                    "onewire": True,
+                    "rgpio": False,
+                },
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(rc_post["ok"])
+            self.assertEqual(rc_post["applied"]["hostname"], "alf-pi")
+            self.assertEqual(rc_post["applied"]["gpu_mem"], 16)
+            self.assertTrue(rc_post["applied"]["spi"])
+            self.assertTrue(rc_post["applied"]["i2c"])
+            self.assertTrue(any(c == ["raspi-config", "nonint", "do_spi", "0"] for c in cmds))
+            self.assertTrue(any(c == ["raspi-config", "nonint", "do_vnc", "1"] for c in cmds))
+            self.assertTrue(any(c == ["raspi-config", "nonint", "do_memory_split", "16"] for c in cmds))
+            self.assertTrue(any(c == ["raspi-config", "nonint", "do_expand_rootfs"] for c in cmds))
+
+            # 5. Power action
+            code, pwr_res = await gui.handle_api_request(
+                "POST", "/api/system/power", body={"action": "reboot"}
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(any(c == ["systemctl", "reboot"] for c in cmds))
+
 
 if __name__ == "__main__":
     unittest.main()

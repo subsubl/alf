@@ -102,6 +102,8 @@ Configured under `web_ui:` in [`pi_hub/config.yaml`](pi_hub/config.yaml) (`enabl
   - Send encrypted Spixi chat messages (`/api/quixi/chat`), dial/hang up VoIP calls (`/api/quixi/voip`), or run any raw QuIXI REST method via the **Universal QuIXI RPC Explorer** (`/api/quixi/rpc`).
 - **ESP32-S3 Live Monitoring, Sensors & Firmware Updater (`/api/esp32/*`)**:
   - Live 240×240 round face canvas, 921600-baud ping & raw NDJSON console, QMI8658 6-axis IMU & 32-device BLE radar polling, allow-listed GPIO matrix (`15, 16, 17, 18, 21, 33..37`) + `Vbat` battery voltage readout, Wyoming audio/earcon controls, and browser upload + live USB reflashing of `zephyr.bin`.
+- **Raspberry Pi Network & `raspi-config` Settings (`/api/system/network`, `/api/system/raspi-config`, `/api/system/power`)**:
+  - Available both during **first-boot AP mode** (optional/skippable) and **anytime later** in the Pi Web GUI (`:8082`): Wi-Fi scan/connect, DHCP vs Static IPv4 (CIDR, gateway, DNS), hostname, Wi-Fi country, timezone, locale, keyboard layout, boot behaviour/wait-for-network, GPU memory split, rootfs expand, hardware interfaces (SSH, VNC, SPI, I2C, Serial HW/Console, 1-Wire, Remote GPIO), and Reboot/Shutdown.
 
 ### 2 · Remote AI Server Web GUI & `/v1` OpenAI Bridge (`http://127.0.0.1:8080`)
 Configured via `WEB_UI_ENABLED=true`, `WEB_UI_HOST=127.0.0.1`, `WEB_UI_PORT=8080`, and optional `WEB_UI_TOKEN` in [`server_agent/.env.example`](server_agent/.env.example):
