@@ -889,14 +889,72 @@ class FakeQuIXIBus:
             status, err_body = self.forced_http_errors.pop((src_addr, method))
             return FakeHTTPResponse(status=status, text_body=err_body)
 
+        if method == "status":
+            return FakeHTTPResponse(
+                200,
+                json.dumps(
+                    {
+                        "result": {
+                            "nodeStatus": "Running",
+                            "networkType": "mainnet",
+                            "blockHeight": 4201337,
+                            "dltStatus": "Connected",
+                            "s2Status": "Connected",
+                            "address": src_addr,
+                        }
+                    }
+                ),
+            )
+
+        if method in {"mywallet", "myWallet", "viewwallet"}:
+            extra_addrs = getattr(self, "_generated_addrs", {}).get(src_addr, [])
+            wallet_map = {src_addr: "100.00000000"}
+            for a in extra_addrs:
+                wallet_map[a] = "0.00000000"
+            return FakeHTTPResponse(200, json.dumps({"result": wallet_map}))
+
+        if method == "gettotalbalance":
+            return FakeHTTPResponse(200, json.dumps({"result": "100.00000000"}))
+
+        if method == "generatenewaddress":
+            if not hasattr(self, "_generated_addrs"):
+                self._generated_addrs = {}
+            lst = self._generated_addrs.setdefault(src_addr, [])
+            new_addr = f"{src_addr}_sub{len(lst) + 1}"
+            lst.append(new_addr)
+            return FakeHTTPResponse(200, json.dumps({"result": new_addr}))
+
+        if method == "backupwallet":
+            return FakeHTTPResponse(200, json.dumps({"result": f"IXI_WALLET_BACKUP_{src_addr}"}))
+
+        if method == "getNick":
+            nick = getattr(self, "_nicks", {}).get(src_addr, "Alf-Pi-Hub")
+            return FakeHTTPResponse(200, json.dumps({"result": nick}))
+
+        if method == "setNick":
+            if not hasattr(self, "_nicks"):
+                self._nicks = {}
+            self._nicks[src_addr] = params.get("nick", "Alf-Pi-Hub")
+            return FakeHTTPResponse(200, json.dumps({"result": self._nicks[src_addr]}))
+
         if method == "contacts":
-            return FakeHTTPResponse(200, json.dumps({"result": self.contacts.get(src_addr, [])}))
+            q = (params.get("search") or "").strip().lower()
+            items = self.contacts.get(src_addr, [])
+            if q:
+                items = [c for c in items if q in str(c).lower()]
+            return FakeHTTPResponse(200, json.dumps({"result": items}))
 
         if method in {"addContact", "acceptContact"}:
             peer = params.get("address", "")
             if peer and peer not in self.contacts.setdefault(src_addr, []):
                 self.contacts[src_addr].append(peer)
             return FakeHTTPResponse(200, json.dumps({"result": {"address": peer}}))
+
+        if method == "removeContact":
+            peer = params.get("address", "")
+            if peer in self.contacts.get(src_addr, []):
+                self.contacts[src_addr].remove(peer)
+            return FakeHTTPResponse(200, json.dumps({"result": {"removed": peer}}))
 
         if method == "sendSpixiMessage":
             dst = params["address"]

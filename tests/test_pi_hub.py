@@ -953,5 +953,242 @@ class TestPiCompanionHub(unittest.IsolatedAsyncioTestCase):
                 await hub.esp.stop()
 
 
+class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
+    """Tests for PiWebGUI: QuIXI account creation, wallet, contacts/friend requests, ESP32-S3 live monitor, and WebSocket."""
+
+    async def test_pi_web_gui_quixi_account_contacts_voip_and_rpc(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            hub, esp, bus, port = _make_hub_with_mocks(tmp_path)
+            gui = hub.gui
+            gui.ixian_cfg_path = tmp_path / "ixian.cfg"
+            gui.auth_token = "pi-admin-token"
+
+            # 1. Token auth gate
+            code, _ = await gui.handle_api_request("GET", "/api/status")
+            self.assertEqual(code, 401)
+            hdrs = {"Authorization": "Bearer pi-admin-token"}
+
+            # 2. QuIXI Account Provisioning (ixian.cfg with masked password)
+            code, prov = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/account/provision",
+                body={
+                    "walletPassword": "MySuperSecretWalletPassword123!",
+                    "networkType": "testnet",
+                    "apiPort": 8001,
+                    "mqPort": 1883,
+                },
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(prov["cfg"]["walletPasswordSet"])
+            self.assertEqual(prov["cfg"]["walletPasswordMasked"], "***")
+            self.assertEqual(prov["cfg"]["networkType"], "testnet")
+            self.assertNotIn("MySuperSecretWalletPassword123!", json.dumps(prov))
+            self.assertIn("MySuperSecretWalletPassword123!", gui.ixian_cfg_path.read_text(encoding="utf-8"))
+
+            # 3. Account Nickname, New Wallet Address Generation, Wallet View & Backup
+            code, nick_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/account/nick",
+                body={"nick": "Alf-LivingRoom-Pi"},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(nick_res["nick"], "Alf-LivingRoom-Pi")
+
+            code, new_addr = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/account/new_address",
+                body={},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+            self.assertIn("_sub1", str(new_addr["address"]))
+
+            code, wal = await gui.handle_api_request("GET", "/api/quixi/account/wallet", headers=hdrs)
+            self.assertEqual(code, 200)
+            self.assertEqual(wal["balance"], "100.00000000")
+
+            code, bkp = await gui.handle_api_request("GET", "/api/quixi/account/backup", headers=hdrs)
+            self.assertEqual(code, 200)
+            self.assertIn("IXI_WALLET_BACKUP", str(bkp["backup"]))
+
+            # 4. Contacts: Send Friend Request (/addContact), Accept (/acceptContact), Search, Remove (/removeContact)
+            code, add_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/contacts/add",
+                body={"address": "1FriendWalletABC"},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+
+            code, acc_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/contacts/accept",
+                body={"address": "1FriendWalletXYZ"},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+
+            code, c_list = await gui.handle_api_request(
+                "GET", "/api/quixi/contacts?search=xyz", headers=hdrs
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(c_list["contacts"], ["1FriendWalletXYZ"])
+
+            code, rem_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/contacts/remove",
+                body={"address": "1FriendWalletABC"},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+
+            # 5. One-Click Pair AI Server + VoIP Dial + Encrypted Chat + Generic RPC Explorer
+            code, pair_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/pair_server",
+                body={"server_ixian_address": "1NewAIServerWallet", "dial_voip": True},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(hub.server_address, "1NewAIServerWallet")
+            self.assertTrue(pair_res["voip_dialed"])
+
+            code, chat_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/chat",
+                body={"address": "1NewAIServerWallet", "message": "Hello Server from Pi GUI!"},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+
+            code, rpc_res = await gui.handle_api_request(
+                "POST",
+                "/api/quixi/rpc",
+                body={"method": "status", "params": {}},
+                headers=hdrs,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(rpc_res["response"]["result"]["nodeStatus"], "Running")
+
+            code, ov = await gui.handle_api_request("GET", "/api/quixi/overview", headers=hdrs)
+            self.assertEqual(code, 200)
+            self.assertEqual(ov["nick"], "Alf-LivingRoom-Pi")
+
+    async def test_pi_web_gui_esp32_live_monitoring_and_http_websocket(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, esp, bus, port = _make_hub_with_mocks(Path(tmp))
+            gui = hub.gui
+            gui.host = "127.0.0.1"
+            gui.port = 0
+
+            with patch("pi_hub.esp_serial_bridge.serial.Serial", return_value=port):
+                await hub.esp.start()
+                bound_port = await gui.start()
+                self.assertGreater(bound_port, 0)
+                try:
+                    # 1. Ping ESP32 over 921600 serial bridge
+                    code, ping_res = await gui.handle_api_request("POST", "/api/esp32/ping")
+                    self.assertEqual(code, 200)
+                    self.assertTrue(ping_res["ok"])
+
+                    # 2. Set ESP32 face emotion, subtitle & mouth
+                    code, st_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/state",
+                        body={"emotion": "SURPRISED", "subtitle": "Pi GUI Test!", "mouth": 65},
+                    )
+                    self.assertEqual(code, 200)
+                    await asyncio.sleep(0.03)
+                    self.assertEqual(esp.emo, "SURPRISED")
+                    self.assertEqual(esp.sub, "Pi GUI Test!")
+                    self.assertEqual(esp.mouth, 65)
+
+                    # 3. Update ESP32 display brightness, speaker volume, and 'wake' mic mode
+                    code, cfg_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/cfg",
+                        body={"brightness": 55, "volume": 80, "mic_mode": "wake"},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertEqual(hub.audio.mic_mode, "wake")
+                    self.assertEqual(esp.bright, 55)
+
+                    # 4. Poll QMI8658 6-axis IMU & BLE Radar
+                    code, imu_res = await gui.handle_api_request("POST", "/api/esp32/imu")
+                    self.assertEqual(code, 200)
+                    self.assertTrue(imu_res["ok"])
+                    self.assertIn("ax", imu_res["imu"])
+
+                    code, ble_res = await gui.handle_api_request(
+                        "POST", "/api/esp32/ble", body={"min_rssi": -70}
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertTrue(ble_res["ok"])
+                    self.assertTrue(all(d["rssi"] >= -70 for d in ble_res["ble"]))
+
+                    # 5. Allow-listed GPIO write + read with Vbat ADC
+                    code, gw_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/gpio",
+                        body={"action": "write", "pin": 16, "dir": "out", "pull": "none", "val": 1},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertTrue(gw_res["ok"])
+
+                    code, gr_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/gpio",
+                        body={"action": "get", "pin": 16},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertEqual(gr_res["response"]["val"], 1)
+                    self.assertGreater(gui.esp_telemetry["vbat_mv"], 3000)
+
+                    # 6. Audio earcon & wake trigger control
+                    code, ear_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/audio/control",
+                        body={"action": "earcon", "kind": "awake"},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertGreater(ear_res["bytes"], 100)
+
+                    # 7. Live TCP HTTP GET / and RFC 6455 WebSocket /api/ws
+                    reader, writer = await asyncio.open_connection("127.0.0.1", bound_port)
+                    writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    await writer.drain()
+                    raw_html = await asyncio.wait_for(reader.read(), timeout=3.0)
+                    writer.close()
+                    self.assertIn(b"HTTP/1.1 200 OK", raw_html)
+                    self.assertIn(b"piFaceCanvas", raw_html)
+
+                    reader, writer = await asyncio.open_connection("127.0.0.1", bound_port)
+                    ws_req = (
+                        "GET /api/ws HTTP/1.1\r\n"
+                        "Host: 127.0.0.1\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                        "Sec-WebSocket-Version: 13\r\n\r\n"
+                    ).encode("latin-1")
+                    writer.write(ws_req)
+                    await writer.drain()
+                    hdr_lines = b""
+                    while not hdr_lines.endswith(b"\r\n\r\n"):
+                        ch = await asyncio.wait_for(reader.read(1), timeout=2.0)
+                        if not ch:
+                            break
+                        hdr_lines += ch
+                    self.assertIn(b"101 Switching Protocols", hdr_lines)
+                    writer.close()
+                finally:
+                    await gui.stop()
+                    await hub.esp.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

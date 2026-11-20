@@ -70,6 +70,10 @@ flowchart LR
 - Smart VAD onset debounce (`vad_trigger_level` consecutive voiced frames to reject transient clicks while preserving the 300 ms pre-roll ring buffer) + `max_turn_seconds` runaway stream cutoff.
 - Instant zero-latency local earcon chimes (`awake`, `done`, `error` — built-in synthesized 16 kHz chimes or custom `.wav` files) and a Bluetooth PortAudio stream watchdog (`check_and_heal_streams`) that automatically recovers when a BT headset/speaker power-cycles.
 - Executes `tool_call` / `tool_batch` hardware RPCs from the agent against Tier 1.
+- **Built-in Pi Hub Web GUI (`pi_hub/pi_web_gui.py`, default `http://127.0.0.1:8082`)**:
+  - **QuIXI Account Creation & Wallet Provisioning**: Provision `/opt/quixi/ixian.cfg` (`walletPassword` with `chmod 600` & masked GET responses, `mainnet`/`testnet`, API/MQTT ports), set account nickname (`/setNick`), generate new derived Ixian wallet addresses (`/generatenewaddress`), view balances (`/mywallet`, `/gettotalbalance`), and export wallet backups (`/backupwallet`).
+  - **Contacts, Friend Requests & One-Click AI Server Pairing**: List/search contacts (`/contacts`), send friend requests (`/addContact`), accept incoming requests (`/acceptContact`), remove contacts (`/removeContact`), send encrypted Spixi chat messages (`/sendChatMessage`), dial/hang up Spixi VoIP calls, or execute any custom QuIXI REST RPC (`/api/quixi/rpc`).
+  - **ESP32-S3 Live Monitoring & Control Panel**: Real-time 240×240 round face mirror over WebSockets (`/api/ws`), 921600-baud ping & raw NDJSON console, QMI8658 6-axis IMU & 32-device BLE radar polling, allow-listed GPIO matrix + `Vbat` battery voltage readout, and Wyoming audio/earcon controls.
 
 **Tier 3 — `server_agent` (with Open WebUI-Inspired Control Center & `/v1` Bridge)**
 - OpenAI-compatible STT (`/v1/audio/transcriptions`), chat with six dynamic hardware tools (`/v1/chat/completions`) and tool-call-safe history trimming, and TTS (`/v1/audio/speech`).

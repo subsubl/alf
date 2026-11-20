@@ -32,3 +32,9 @@ audio:
   default_mic_mode: vad       # "vad", "ptt", "duplex", or "wake"
   input_device: null          # Optional sounddevice index or name (null = system default PipeWire/Pulse)
   output_device: null
+
+web_ui:
+  enabled: true               # Built-in Raspberry Pi Hub Web GUI (QuIXI wallet/contacts + ESP32-S3 monitor)
+  host: 127.0.0.1             # Bind address (use 0.0.0.0 with auth_token for LAN access)
+  port: 8082                  # HTTP + WebSocket port
+  auth_token: null            # Optional bearer token required for /api/* when non-empty

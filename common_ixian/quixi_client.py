@@ -301,14 +301,57 @@ class QuIXIClient:
 
             return {"result": data}
 
-    async def contacts(self) -> Dict[str, Any]:
-        return await self._call_api("contacts")
+    async def status(self) -> Dict[str, Any]:
+        """Query QuIXI node status (/status)."""
+        return await self._call_api("status")
+
+    async def my_wallet(self) -> Dict[str, Any]:
+        """Retrieve local QuIXI wallet addresses and balances (/mywallet)."""
+        return await self._call_api("mywallet")
+
+    async def get_balance(self, address: Optional[str] = None) -> Dict[str, Any]:
+        """Retrieve total IXI balance (/gettotalbalance)."""
+        params: Dict[str, str] = {"address": address} if address else {}
+        return await self._call_api("gettotalbalance", params)
+
+    async def generate_new_address(self, base_address: Optional[str] = None) -> Dict[str, Any]:
+        """Generate a new Ixian wallet address/account (/generatenewaddress)."""
+        params: Dict[str, str] = {"address": base_address} if base_address else {}
+        return await self._call_api("generatenewaddress", params)
+
+    async def view_wallet(self) -> Dict[str, Any]:
+        """Inspect wallet details (/viewwallet)."""
+        return await self._call_api("viewwallet")
+
+    async def backup_wallet(self) -> Dict[str, Any]:
+        """Export encrypted wallet backup (/backupwallet)."""
+        return await self._call_api("backupwallet")
+
+    async def get_nick(self) -> Dict[str, Any]:
+        """Retrieve current local Spixi/QuIXI nickname (/getNick)."""
+        return await self._call_api("getNick")
+
+    async def set_nick(self, nick: str) -> Dict[str, Any]:
+        """Set local Spixi/QuIXI nickname (/setNick)."""
+        return await self._call_api("setNick", {"nick": nick})
+
+    async def contacts(self, search: Optional[str] = None) -> Dict[str, Any]:
+        params: Dict[str, str] = {"search": search} if search else {}
+        return await self._call_api("contacts", params)
 
     async def add_contact(self, address: str) -> Dict[str, Any]:
         return await self._call_api("addContact", {"address": address})
 
     async def accept_contact(self, address: str) -> Dict[str, Any]:
         return await self._call_api("acceptContact", {"address": address})
+
+    async def remove_contact(self, address: str) -> Dict[str, Any]:
+        """Remove a contact from QuIXI (/removeContact)."""
+        return await self._call_api("removeContact", {"address": address})
+
+    async def call_rpc(self, method: str, params: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """Invoke any QuIXI or Ixian-Core REST API method by name."""
+        return await self._call_api(method.lstrip("/"), params)
 
     async def send_chat_message(self, address: str, message: str, channel: int = 0) -> Dict[str, Any]:
         return await self._call_api(

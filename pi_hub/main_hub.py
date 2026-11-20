@@ -25,6 +25,7 @@ from common_ixian import QuIXIClient, QuIXIError, SpixiVoIPSessionManager
 from common_ixian.quixi_client import _extract_b64_bytes
 from pi_hub.audio_sync_engine import AudioSyncEngine
 from pi_hub.esp_serial_bridge import EspSerialBridge
+from pi_hub.pi_web_gui import PiWebGUI
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,14 +107,27 @@ class PiCompanionHub:
         self._interrupted_turn_ids: Deque[str] = collections.deque(maxlen=16)
         self._superseded_chat_stream_ids: Deque[str] = collections.deque(maxlen=16)
 
+        web_cfg = cfg.get("web_ui") if isinstance(cfg.get("web_ui"), dict) else {}
+        self.web_ui_enabled: bool = bool(web_cfg.get("enabled", True))
+        self.gui = PiWebGUI(
+            self,
+            host=str(web_cfg.get("host", "127.0.0.1") or "127.0.0.1"),
+            port=int(web_cfg.get("port", 8082)),
+            auth_token=web_cfg.get("auth_token"),
+        )
+
     async def start(self) -> None:
         self.esp.set_event_handler(self._on_esp_event)
         self.quixi.on_topic("AppProtocolData", self._on_app_protocol_data)
         self.quixi.on_topic("ChatStream", self._on_chat_stream)
+        self.quixi.on_topic("Chat", self._on_quixi_chat_event)
+        self.quixi.on_topic("FriendStatusUpdate", self._on_quixi_friend_event)
 
         await self.esp.start()
         await self.quixi.start()
         await self.audio.start()
+        if self.web_ui_enabled:
+            await self.gui.start()
 
         await self.esp.set_debug(quixi="ONLINE", voip="DIALING", bt_spk="OK")
         await self.esp.set_state("IDLE", "Connecting to AI Server...")
@@ -135,6 +149,7 @@ class PiCompanionHub:
                         pass
                 await asyncio.sleep(10.0)
         finally:
+            await self.gui.stop()
             await self.audio.stop()
             await self.quixi.stop()
             await self.esp.stop()
@@ -195,8 +210,12 @@ class PiCompanionHub:
     async def _on_speech_capture_state(self, active: bool) -> None:
         if active:
             await self.esp.set_state("LISTENING", "Listening...", mic=1)
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(emo="LISTENING", sub="Listening...")
         else:
             await self.esp.set_state("THINKING", "Thinking...", mic=0)
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(emo="THINKING", sub="Thinking...")
             payload: Dict[str, Any] = {"kind": "end_of_turn"}
             if self.voip.current_session_id:
                 payload["session_id"] = self.voip.current_session_id.hex()
@@ -222,6 +241,8 @@ class PiCompanionHub:
         await self.esp.set_mouth(0)
         if subtitle is not None:
             await self.esp.set_state("IDLE", subtitle)
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.update_face_state(emo="IDLE", sub=subtitle or "", mouth=0)
         await self._send_agent_app_data(
             self.server_address,
             {"kind": "barge_in", "act": "stop_speech"},
@@ -232,11 +253,15 @@ class PiCompanionHub:
 
     async def _on_viseme_frame(self, value: int) -> None:
         await self.esp.set_mouth(value)
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.update_face_state(mouth=value)
 
     async def _on_playback_done(self) -> None:
         self._current_tts_turn_id = None
         if not self.audio.is_capturing:
             await self.esp.set_state("IDLE")
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(emo="IDLE", mouth=0)
 
     async def _on_voip_rx_audio(self, session_id: bytes, data: bytes, codec: str) -> None:
         """VoIPManager.onData equivalent: write incoming TTS audio to BT speaker."""
@@ -244,7 +269,19 @@ class PiCompanionHub:
             return
         self.audio.feed_tts_audio(data)
 
+    async def _on_quixi_chat_event(self, topic: str, payload: Dict[str, Any]) -> None:
+        if hasattr(self, "gui") and self.gui is not None:
+            raw = _extract_b64_bytes(payload)
+            msg = raw.decode("utf-8", errors="ignore") if raw else ""
+            self.gui.record_quixi_event(topic, payload, summary=msg)
+
+    async def _on_quixi_friend_event(self, topic: str, payload: Dict[str, Any]) -> None:
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.record_quixi_event(topic, payload, summary="FriendStatusUpdate")
+
     async def _on_esp_event(self, evt: Dict[str, Any]) -> None:
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.record_esp_event(evt)
         src = evt.get("src")
         act = evt.get("act")
 
