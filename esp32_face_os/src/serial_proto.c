@@ -26,6 +26,15 @@ static bool isr_overflow;
 static char ble_arr_buf[3584];
 static char ble_resp_buf[4096];
 
+/* Raw RGB565 binary frame reception state (armed by img_bin JSON header) */
+static volatile size_t bin_rx_remaining;
+static volatile size_t bin_rx_offset;
+static volatile bool bin_frame_done;
+static volatile int64_t bin_last_rx_ms;
+static int bin_frame_w = UI_MEDIA_W;
+static int bin_frame_h = UI_MEDIA_H;
+static char bin_frame_id[32];
+
 static void uart_isr_cb(const struct device *dev, void *user_data)
 {
     ARG_UNUSED(user_data);
@@ -38,6 +47,19 @@ static void uart_isr_cb(const struct device *dev, void *user_data)
         uint8_t c;
         if (uart_fifo_read(dev, &c, 1) <= 0) {
             break;
+        }
+
+        if (bin_rx_remaining > 0) {
+            uint8_t *dst = ui_media_get_buffer();
+            if (dst && bin_rx_offset < UI_MEDIA_BYTES) {
+                dst[bin_rx_offset++] = c;
+            }
+            bin_rx_remaining--;
+            bin_last_rx_ms = k_uptime_get();
+            if (bin_rx_remaining == 0) {
+                bin_frame_done = true;
+            }
+            continue;
         }
 
         if (c == '\n' || c == '\r') {
@@ -536,6 +558,45 @@ static void handle_json_line(const char *line)
                  "{\"t\":\"res\",\"id\":\"%s\",\"ok\":1,\"cnt\":%d,\"ble\":%s}",
                  id, cnt, ble_arr_buf);
         serial_send_json(ble_resp_buf);
+    } else if (strcmp(type, "img_bin") == 0) {
+        int w = json_get_int(line, "w", UI_MEDIA_W);
+        int h = json_get_int(line, "h", UI_MEDIA_H);
+        int len = json_get_int(line, "len", 0);
+        if (w <= 0 || w > UI_MEDIA_W || h <= 0 || h > UI_MEDIA_H ||
+            len <= 0 || len > UI_MEDIA_BYTES || len != (w * h * 2)) {
+            char resp[128];
+            snprintf(resp, sizeof(resp),
+                     "{\"t\":\"res\",\"id\":\"%s\",\"ok\":0,\"err\":-22}", id);
+            serial_send_json(resp);
+            return;
+        }
+        unsigned int key = irq_lock();
+        bin_frame_w = w;
+        bin_frame_h = h;
+        snprintf(bin_frame_id, sizeof(bin_frame_id), "%s", id);
+        bin_rx_offset = 0;
+        bin_frame_done = false;
+        bin_last_rx_ms = k_uptime_get();
+        bin_rx_remaining = (size_t)len;
+        irq_unlock(key);
+
+        if (id[0] != '\0') {
+            char resp[128];
+            snprintf(resp, sizeof(resp),
+                     "{\"t\":\"res\",\"id\":\"%s\",\"ok\":1,\"ready\":1}", id);
+            serial_send_json(resp);
+        }
+    } else if (strcmp(type, "img_clr") == 0) {
+        unsigned int key = irq_lock();
+        bin_rx_remaining = 0;
+        bin_frame_done = false;
+        irq_unlock(key);
+        ui_media_clear();
+        if (id[0] != '\0') {
+            char resp[96];
+            snprintf(resp, sizeof(resp), "{\"t\":\"res\",\"id\":\"%s\",\"ok\":1}", id);
+            serial_send_json(resp);
+        }
     } else if (strcmp(type, "imu_get") == 0) {
         imu_data_t imu;
         imu_qmi8658_get_latest(&imu);
@@ -562,6 +623,23 @@ void serial_send_ble_evt(void)
 
 void serial_proto_poll(void)
 {
+    if (bin_frame_done) {
+        bin_frame_done = false;
+        ui_media_present(bin_frame_w, bin_frame_h);
+        if (bin_frame_id[0] != '\0') {
+            char resp[128];
+            snprintf(resp, sizeof(resp),
+                     "{\"t\":\"res\",\"id\":\"%s\",\"ok\":1,\"shown\":1}", bin_frame_id);
+            serial_send_json(resp);
+            bin_frame_id[0] = '\0';
+        }
+    } else if (bin_rx_remaining > 0 && (k_uptime_get() - bin_last_rx_ms) > 1500) {
+        unsigned int key = irq_lock();
+        bin_rx_remaining = 0;
+        bin_rx_offset = 0;
+        irq_unlock(key);
+    }
+
     static char line[RX_LINE_MAX];
     while (k_msgq_get(&rx_msgq, line, K_NO_WAIT) == 0) {
         handle_json_line(line);

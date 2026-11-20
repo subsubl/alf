@@ -1214,6 +1214,15 @@ class MockESP32:
         self.ports: List[FakeSerialPort] = []
         self._buf = bytearray()
         self._uptime_ms = 1000
+        self.media_visible = False
+        self.media_w = 0
+        self.media_h = 0
+        self.media_frames: List[bytes] = []
+        self._bin_remaining = 0
+        self._bin_buf = bytearray()
+        self._bin_w = 120
+        self._bin_h = 120
+        self._bin_id = ""
 
     def attach_port(self, port: FakeSerialPort) -> None:
         if port not in self.ports:
@@ -1228,7 +1237,27 @@ class MockESP32:
 
     def handle_host_bytes(self, data: bytes, port: FakeSerialPort) -> None:
         self._buf.extend(data)
-        while b"\n" in self._buf:
+        while True:
+            if self._bin_remaining > 0:
+                take = min(self._bin_remaining, len(self._buf))
+                if take <= 0:
+                    break
+                self._bin_buf.extend(self._buf[:take])
+                del self._buf[:take]
+                self._bin_remaining -= take
+                if self._bin_remaining == 0:
+                    self.media_visible = True
+                    self.media_w = self._bin_w
+                    self.media_h = self._bin_h
+                    self.media_frames.append(bytes(self._bin_buf))
+                    self._bin_buf.clear()
+                    if self._bin_id:
+                        self._send_resp(port, {"t": "res", "id": self._bin_id, "ok": 1, "shown": 1})
+                        self._bin_id = ""
+                continue
+
+            if b"\n" not in self._buf:
+                break
             raw_line, _, rest = self._buf.partition(b"\n")
             self._buf = bytearray(rest)
             raw_clean = raw_line.rstrip(b"\r")
@@ -1283,6 +1312,27 @@ class MockESP32:
             v = _safe_int(cmd.get("v"))
             if v is not None and v >= 0:
                 self.mouth = max(0, min(100, v))
+
+        elif t == "img_bin":
+            w = _safe_int(cmd.get("w")) or 120
+            h = _safe_int(cmd.get("h")) or 120
+            length = _safe_int(cmd.get("len")) or 0
+            if w <= 0 or w > 120 or h <= 0 or h > 120 or length <= 0 or length != w * h * 2:
+                self._send_resp(port, {"t": "res", "id": req_id, "ok": 0, "err": -22})
+            else:
+                self._bin_w = w
+                self._bin_h = h
+                self._bin_id = req_id
+                self._bin_buf.clear()
+                self._bin_remaining = length
+                self._send_resp(port, {"t": "res", "id": req_id, "ok": 1, "ready": 1})
+
+        elif t == "img_clr":
+            self._bin_remaining = 0
+            self._bin_buf.clear()
+            self.media_visible = False
+            if req_id:
+                self._send_resp(port, {"t": "res", "id": req_id, "ok": 1})
 
         elif t == "dbg":
             for k in ("quixi", "voip", "bt_spk"):

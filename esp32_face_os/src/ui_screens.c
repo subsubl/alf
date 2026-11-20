@@ -38,6 +38,19 @@ static lv_obj_t *status_lbl;
 static lv_obj_t *vbat_lbl;
 static lv_obj_t *sub_box;
 static lv_obj_t *sub_lbl;
+static lv_obj_t *media_img;
+static uint8_t media_buf[UI_MEDIA_BYTES];
+static lv_img_dsc_t media_dsc = {
+    .header = {
+        .cf = LV_IMG_CF_TRUE_COLOR,
+        .always_zero = 0,
+        .reserved = 0,
+        .w = UI_MEDIA_W,
+        .h = UI_MEDIA_H,
+    },
+    .data_size = UI_MEDIA_BYTES,
+    .data = media_buf,
+};
 
 /* Settings screen widgets */
 static lv_obj_t *cfg_bright_lbl;
@@ -761,6 +774,18 @@ static void build_face_screen(void)
     lv_obj_set_style_text_font(sub_lbl, &lv_font_montserrat_12, 0);
     lv_label_set_text(sub_lbl, "Tap face to speak");
     lv_obj_align(sub_lbl, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    /* Full-screen RGB565 media overlay (hidden until img_bin arrives) */
+    media_img = lv_img_create(scr_face);
+    lv_img_set_src(media_img, &media_dsc);
+    lv_obj_set_size(media_img, UI_MEDIA_W, UI_MEDIA_H);
+    lv_img_set_pivot(media_img, UI_MEDIA_W / 2, UI_MEDIA_H / 2);
+    lv_img_set_zoom(media_img, 512); /* 2.0x -> 240x240 full round LCD */
+    lv_obj_center(media_img);
+    lv_obj_add_flag(media_img, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(media_img, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(media_img, face_tap_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(media_img, screen_gesture_cb, LV_EVENT_GESTURE, NULL);
 }
 
 static void build_settings_screen(void)
@@ -1328,5 +1353,41 @@ void ui_set_sleep_timeout_s(int sleep_s)
 
     if (cfg_sleep_lbl) {
         lv_label_set_text(cfg_sleep_lbl, sleep_label_from_idx(cfg_sleep_idx));
+    }
+}
+
+uint8_t *ui_media_get_buffer(void)
+{
+    return media_buf;
+}
+
+void ui_media_present(int w, int h)
+{
+    if (w <= 0 || w > UI_MEDIA_W) w = UI_MEDIA_W;
+    if (h <= 0 || h > UI_MEDIA_H) h = UI_MEDIA_H;
+    media_dsc.header.w = (uint32_t)w;
+    media_dsc.header.h = (uint32_t)h;
+    media_dsc.data_size = (uint32_t)(w * h * 2);
+    if (media_img) {
+        uint16_t zoom = (uint16_t)((240 * 256) / w);
+        lv_img_set_src(media_img, &media_dsc);
+        lv_obj_set_size(media_img, w, h);
+        lv_img_set_pivot(media_img, w / 2, h / 2);
+        lv_img_set_zoom(media_img, zoom);
+        lv_obj_center(media_img);
+        lv_obj_clear_flag(media_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(media_img);
+    }
+    if (current_screen_idx != 0) {
+        switch_to_screen(0);
+    }
+    ui_wake_display();
+}
+
+void ui_media_clear(void)
+{
+    if (media_img) {
+        lv_obj_add_flag(media_img, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_invalidate(scr_face);
     }
 }

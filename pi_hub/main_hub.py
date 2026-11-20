@@ -28,6 +28,7 @@ from common_ixian.quixi_client import _extract_b64_bytes
 from pi_hub.audio_sync_engine import _REAL_NUMPY, AudioSyncEngine, np
 from pi_hub.esp_firmware_updater import EspFirmwareUpdater
 from pi_hub.esp_serial_bridge import EspSerialBridge
+from pi_hub.media_streamer import EspMediaStreamer
 from pi_hub.pi_web_gui import PiWebGUI
 
 logging.basicConfig(
@@ -101,6 +102,7 @@ class PiCompanionHub:
             baudrate=int(ser_cfg.get("baudrate", 921600)),
         )
         self.firmware = EspFirmwareUpdater(self.esp)
+        self.media = EspMediaStreamer(self.esp)
         self.quixi = QuIXIClient(
             rest_url=q_cfg["rest_url"],
             mqtt_host=q_cfg["mqtt_host"],
@@ -806,6 +808,25 @@ class PiCompanionHub:
         args = raw_args if isinstance(raw_args, dict) else {}
         try:
             if tool == "set_companion_emotion":
+                disp_mode = str(args.get("display_mode") or "face").strip().lower()
+                if disp_mode == "clear":
+                    clr_res = await self.media.stop_stream(clear_lcd=True)
+                    return {"ok": clr_res.get("ok") == 1, "display_mode": "clear", "esp_response": clr_res}
+                if disp_mode == "image" or args.get("image_url") or args.get("image_b64") or args.get("media_path"):
+                    if disp_mode != "video" and not args.get("video_url"):
+                        return await self.media.display_image(
+                            image_url=args.get("image_url"),
+                            image_b64=args.get("image_b64"),
+                            media_path=args.get("media_path"),
+                        )
+                if disp_mode == "video" or args.get("video_url"):
+                    v_src = str(args.get("video_url") or args.get("media_path") or "").strip()
+                    return await self.media.start_video_stream(
+                        video_url=v_src,
+                        fps=int(args.get("fps", 5)),
+                        duration_s=float(args.get("duration_s", 10.0)),
+                    )
+                await self.media.stop_stream(clear_lcd=True)
                 await self.esp.set_state(str(args.get("emotion", "HAPPY")), args.get("subtitle"))
                 return {"ok": True}
 

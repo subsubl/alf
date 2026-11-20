@@ -1772,6 +1772,104 @@ class TestFirstBootAPSetupPortal(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(code, 200)
             self.assertTrue(any(c == ["systemctl", "reboot"] for c in cmds))
 
+    async def test_esp32_fullscreen_image_and_video_stream_tool_and_gui(self) -> None:
+        """Verify LLM agent and PiWebGUI can display full-screen RGB565 images and stream video to ESP32-S3 LCD."""
+        from pi_hub.media_streamer import decode_image_to_rgb565
+
+        # 1. Pure-Python PPM P6 -> 120x120 RGB565 conversion
+        ppm_hdr = b"P6\n4 4\n255\n"
+        ppm_px = bytes([255, 0, 0] * 16)  # pure red (RGB565 0xF800)
+        rgb565 = decode_image_to_rgb565(ppm_hdr + ppm_px, target_w=120, target_h=120)
+        self.assertEqual(len(rgb565), 120 * 120 * 2)
+        self.assertEqual(struct.unpack_from("<H", rgb565, 0)[0], 0xF800)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, esp, bus, port = _make_hub_with_mocks(Path(tmp))
+            with patch("pi_hub.esp_serial_bridge.serial.Serial", return_value=port):
+                await hub.esp.start()
+                try:
+                    # 2. LLM tool `set_companion_emotion(display_mode="image", image_b64=...)`
+                    b64_ppm = base64.b64encode(ppm_hdr + ppm_px).decode("ascii")
+                    img_res = await hub._run_single_tool(
+                        "set_companion_emotion",
+                        {"emotion": "HAPPY", "display_mode": "image", "image_b64": b64_ppm},
+                    )
+                    self.assertTrue(img_res["ok"])
+                    self.assertTrue(esp.media_visible)
+                    self.assertEqual(esp.media_w, 120)
+                    self.assertEqual(esp.media_h, 120)
+                    self.assertEqual(len(esp.media_frames), 1)
+                    self.assertEqual(esp.media_frames[0], rgb565)
+
+                    # 3. Pi Web GUI `POST /api/esp32/media` (clear)
+                    code, clr_res = await hub.gui.handle_api_request(
+                        "POST", "/api/esp32/media", body={"mode": "clear"}
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertFalse(esp.media_visible)
+
+                    # 4. LLM tool `set_companion_emotion(display_mode="video", video_url=...)` via mocked ffmpeg pipe
+                    frame_a = b"\x00\xF8" * (120 * 120)
+                    frame_b = b"\xE0\x07" * (120 * 120)
+                    frame_c = b"\x1F\x00" * (120 * 120)
+
+                    class FakeStdout:
+                        def __init__(self, chunks: list[bytes]) -> None:
+                            self._buf = bytearray(b"".join(chunks))
+
+                        async def readexactly(self, n: int) -> bytes:
+                            if len(self._buf) < n:
+                                raise asyncio.IncompleteReadError(bytes(self._buf), n)
+                            out = bytes(self._buf[:n])
+                            del self._buf[:n]
+                            return out
+
+                    class FakeProc:
+                        def __init__(self) -> None:
+                            self.stdout = FakeStdout([frame_a, frame_b, frame_c])
+                            self.returncode = None
+
+                        def terminate(self) -> None:
+                            self.returncode = 0
+
+                        def kill(self) -> None:
+                            self.returncode = -9
+
+                        async def wait(self) -> int:
+                            self.returncode = 0
+                            return 0
+
+                    with (
+                        patch("pi_hub.media_streamer.shutil.which", return_value="/usr/bin/ffmpeg"),
+                        patch("pi_hub.media_streamer.asyncio.create_subprocess_exec", return_value=FakeProc()),
+                    ):
+                        vid_res = await hub._run_single_tool(
+                            "set_companion_emotion",
+                            {
+                                "emotion": "HAPPY",
+                                "display_mode": "video",
+                                "video_url": "https://example.com/demo.mp4",
+                                "fps": 10,
+                                "duration_s": 2.0,
+                            },
+                        )
+                        self.assertTrue(vid_res["ok"])
+                        self.assertTrue(vid_res["streaming"])
+                        await asyncio.sleep(0.15)
+
+                    self.assertGreaterEqual(len(esp.media_frames), 4)
+                    self.assertTrue(esp.media_visible)
+
+                    # 5. Clear LCD returns to normal face
+                    clr2 = await hub._run_single_tool(
+                        "set_companion_emotion", {"emotion": "IDLE", "display_mode": "clear"}
+                    )
+                    self.assertTrue(clr2["ok"])
+                    self.assertFalse(esp.media_visible)
+                finally:
+                    await hub.media.stop_stream(clear_lcd=False)
+                    await hub.esp.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

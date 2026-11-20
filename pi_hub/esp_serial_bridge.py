@@ -289,3 +289,60 @@ class EspSerialBridge:
             return await self.request(pkt, timeout=timeout)
         ok = await self.send(pkt)
         return {"ok": 1 if ok else 0}
+
+    async def send_image_rgb565(
+        self,
+        rgb565_bytes: bytes,
+        width: int = 120,
+        height: int = 120,
+        wait_res: bool = True,
+        timeout: float = 4.0,
+    ) -> Dict[str, Any]:
+        """Stream a raw RGB565 frame (up to 120x120) to the ESP32-S3 full-screen LCD overlay."""
+        if not self._loop or not self._running:
+            return {"ok": 0, "error": "Serial bridge not started"}
+        expected_len = int(width) * int(height) * 2
+        if width <= 0 or width > 120 or height <= 0 or height > 120 or len(rgb565_bytes) != expected_len:
+            return {
+                "ok": 0,
+                "error": f"Invalid RGB565 frame size {len(rgb565_bytes)} for {width}x{height} (expected {expected_len})",
+            }
+
+        req_id = uuid.uuid4().hex[:8]
+        ready_fut: asyncio.Future[Dict[str, Any]] = self._loop.create_future()
+        self._pending[req_id] = ready_fut
+        try:
+            sent = await self.send({"t": "img_bin", "w": int(width), "h": int(height), "len": expected_len, "id": req_id})
+            if not sent:
+                return {"ok": 0, "error": "ESP32 serial not connected"}
+            ready_res = await asyncio.wait_for(ready_fut, timeout=2.0)
+            if ready_res.get("ok") != 1:
+                return ready_res
+
+            shown_fut: Optional[asyncio.Future[Dict[str, Any]]] = None
+            if wait_res:
+                shown_fut = self._loop.create_future()
+                self._pending[req_id] = shown_fut
+
+            with self._tx_lock:
+                ser = self._ser
+                if ser is None or not getattr(ser, "is_open", True):
+                    return {"ok": 0, "error": "ESP32 serial disconnected during frame transfer"}
+                ser.write(rgb565_bytes)
+                ser.flush()
+
+            if shown_fut is not None:
+                return await asyncio.wait_for(shown_fut, timeout=timeout)
+            return {"ok": 1, "w": width, "h": height, "bytes": expected_len}
+        except asyncio.TimeoutError:
+            return {"ok": 0, "error": "ESP32 image frame transfer timeout"}
+        finally:
+            self._pending.pop(req_id, None)
+
+    async def clear_media(self, wait_res: bool = True, timeout: float = 2.0) -> Dict[str, Any]:
+        """Hide the full-screen LCD media overlay and return to the animated companion face."""
+        pkt: Dict[str, Any] = {"t": "img_clr"}
+        if wait_res:
+            return await self.request(pkt, timeout=timeout)
+        ok = await self.send(pkt)
+        return {"ok": 1 if ok else 0}

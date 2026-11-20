@@ -85,4 +85,15 @@ void ui_set_mic_mode_str(const char *mode);
 void ui_set_ble_enabled_ui(bool enabled);
 void ui_set_sleep_timeout_s(int sleep_s);
 
+/**
+ * @brief Full-screen RGB565 image/video frame overlay (120x120 scaled 2x to 240x240).
+ */
+#define UI_MEDIA_W 120
+#define UI_MEDIA_H 120
+#define UI_MEDIA_BYTES (UI_MEDIA_W * UI_MEDIA_H * 2)
+
+uint8_t *ui_media_get_buffer(void);
+void ui_media_present(int w, int h);
+void ui_media_clear(void);
+
 #endif /* UI_SCREENS_H */

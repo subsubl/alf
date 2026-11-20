@@ -49,7 +49,10 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "set_companion_emotion",
-            "description": "Change the animated face expression and status subtitle on the Waveshare ESP32-S3 LCD.",
+            "description": (
+                "Change the animated face expression and status subtitle on the Waveshare ESP32-S3 240x240 round LCD, "
+                "OR display a full-screen image or stream a live video to the ESP32-S3 LCD."
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -70,6 +73,35 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
                     "subtitle": {
                         "type": "string",
                         "description": "Short text shown on screen (up to ~180 chars / 2-3 lines).",
+                    },
+                    "display_mode": {
+                        "type": "string",
+                        "enum": ["face", "image", "video", "clear"],
+                        "description": "LCD mode: 'face' (normal face), 'image' (full-screen image), 'video' (stream video), or 'clear' (return to face).",
+                    },
+                    "image_url": {
+                        "type": "string",
+                        "description": "HTTP/HTTPS URL or data URI of an image to show full-screen when display_mode='image'.",
+                    },
+                    "image_b64": {
+                        "type": "string",
+                        "description": "Base64-encoded PNG/JPEG/PPM/RGB565 image bytes when display_mode='image'.",
+                    },
+                    "video_url": {
+                        "type": "string",
+                        "description": "HTTP/HTTPS/RTSP video, MJPEG, or animated GIF URL/path to stream when display_mode='video'.",
+                    },
+                    "fps": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 10,
+                        "description": "Target frames per second when streaming video (1..10, default 5).",
+                    },
+                    "duration_s": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 60.0,
+                        "description": "Maximum video stream duration in seconds (0.5..60, default 10).",
                     },
                 },
                 "required": ["emotion"],

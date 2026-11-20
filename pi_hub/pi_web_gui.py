@@ -807,6 +807,28 @@ class PiWebGUI:
             await self.hub.esp.send(dict(cmd))
             return 200, {"ok": True, "sent": cmd}
 
+        if method == "POST" and route == "/api/esp32/media":
+            media_mgr = getattr(self.hub, "media", None)
+            if media_mgr is None:
+                return 500, {"ok": False, "error": "Media streamer not initialized"}
+            mode = str(payload.get("mode") or payload.get("display_mode") or "image").strip().lower()
+            if mode == "clear":
+                res = await media_mgr.stop_stream(clear_lcd=True)
+                return 200, {"ok": True, "mode": "clear", "response": res}
+            if mode == "video" or payload.get("video_url"):
+                res = await media_mgr.start_video_stream(
+                    video_url=str(payload.get("video_url") or payload.get("media_path") or ""),
+                    fps=int(payload.get("fps", 5)),
+                    duration_s=float(payload.get("duration_s", 10.0)),
+                )
+                return (200 if res.get("ok") else 400), res
+            res = await media_mgr.display_image(
+                image_url=payload.get("image_url"),
+                image_b64=payload.get("image_b64"),
+                media_path=payload.get("media_path"),
+            )
+            return (200 if res.get("ok") else 400), res
+
         if method == "GET" and route == "/api/esp32/firmware":
             fw_upd = getattr(self.hub, "firmware", None)
             if fw_upd is None:
