@@ -143,6 +143,7 @@ class TestStep5DeploymentArtifacts(unittest.TestCase):
         units = [
             "deploy/systemd/quixi-pi.service",
             "deploy/systemd/tamagci-pi-hub.service",
+            "deploy/systemd/tamagci-firstboot.service",
             "deploy/systemd/quixi-server.service",
             "deploy/systemd/tamagci-server-agent.service",
         ]

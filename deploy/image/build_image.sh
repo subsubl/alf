@@ -81,11 +81,11 @@ cat > "${MNT}/etc/motd" <<'EOF'
 
   Tamagci Pi hub image (Tier 2). No API keys live on this device by design.
 
-  Finish provisioning:
-    1. sudoedit /opt/quixi/ixian.cfg           # set walletPassword
-    2. sudoedit /opt/tamagci/pi_hub/config.yaml # set server_ixian_address
-    3. sudo systemctl enable --now quixi-pi tamagci-pi-hub
-    4. Pair wallets via QuIXI /addContact and /acceptContact (see /opt/tamagci/deploy/DEPLOYMENT.md)
+  First-Boot AP Setup:
+    1. Connect to the "Alf-Setup" Wi-Fi hotspot and open http://192.168.4.1
+    2. Create your Pi user account and enter your Wi-Fi network (required).
+       All other settings (hostname, QuIXI walletPassword, AI Server address) can be skipped
+       and configured later in the Pi Web GUI at http://tamagci.local:8082.
 
 EOF
 

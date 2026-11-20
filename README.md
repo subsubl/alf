@@ -191,6 +191,10 @@ Open `http://127.0.0.1:8080` (or tunnel via SSH) to access the **Server Control 
 **Option A — Prebuilt Bootable Image:**
 Download `tamagci-pi-zero2w-*.img.xz` from [Releases](https://github.com/subsubl/alf/releases) (or the artifact of a [Pi image build](https://github.com/subsubl/alf/actions/workflows/build-rpi-image.yml) run), verify `.sha256`, and flash it with Raspberry Pi Imager ("Use custom"). The image is Raspberry Pi OS Lite (arm64) with Mosquitto, BlueZ/PipeWire, a self-contained `linux-arm64` QuIXI binary, `esptool`, the compiled ESP32-S3 `zephyr.bin` (`/opt/tamagci/firmware/zephyr.bin`), and `pi_hub` pre-installed.
 
+On **first boot**, the Pi automatically starts a temporary Wi-Fi hotspot **`Alf-Setup`** (`http://192.168.4.1`) via `tamagci-firstboot.service`:
+- **Required**: Create your Linux user account (`username` + `password`) and select/enter your Wi-Fi network.
+- **Optional (Skippable)**: Hostname, QuIXI `walletPassword`, and `server_ixian_address` can all be skipped and configured later in the Pi Web GUI (`:8082`).
+
 **Option B — Existing Raspberry Pi OS:**
 
 ```bash

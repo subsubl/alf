@@ -1,0 +1,17 @@
+[Unit]
+Description=Tamagci Pi Zero 2 W First-Boot AP Setup Portal
+ConditionPathExists=!/etc/tamagci/firstboot.done
+After=NetworkManager.service
+Wants=NetworkManager.service
+Before=quixi-pi.service tamagci-pi-hub.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=infinity
+User=root
+WorkingDirectory=/opt/tamagci
+ExecStart="/opt/tamagci/pi_hub/.venv/bin/python" "/opt/tamagci/pi_hub/first_boot_setup.py"
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

@@ -38,6 +38,8 @@ ${SUDO} apt-get install -y \
     pipewire-pulse \
     wireplumber \
     libspa-0.2-bluetooth \
+    network-manager \
+    rfkill \
     curl \
     jq
 
@@ -115,7 +117,19 @@ print(text, end="")
 
 render_unit "${REPO_DIR}/deploy/systemd/quixi-pi.service" "/etc/systemd/system/quixi-pi.service"
 render_unit "${REPO_DIR}/deploy/systemd/tamagci-pi-hub.service" "/etc/systemd/system/tamagci-pi-hub.service"
-if [[ "${TAMAGCI_IMAGE_BUILD:-0}" != "1" ]]; then
+
+# First-boot AP setup portal must run as root (useradd/chpasswd/nmcli)
+TARGET_USER_BACKUP="${TARGET_USER}"
+TARGET_USER="root"
+render_unit "${REPO_DIR}/deploy/systemd/tamagci-firstboot.service" "/etc/systemd/system/tamagci-firstboot.service"
+TARGET_USER="${TARGET_USER_BACKUP}"
+
+if [[ "${TAMAGCI_IMAGE_BUILD:-0}" == "1" ]]; then
+    ${SUDO} rm -f /etc/tamagci/firstboot.done
+    ${SUDO} systemctl enable tamagci-firstboot.service
+    ${SUDO} systemctl enable quixi-pi.service
+    ${SUDO} systemctl enable tamagci-pi-hub.service
+else
     ${SUDO} systemctl daemon-reload
 fi
 

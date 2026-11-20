@@ -1522,5 +1522,133 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                     await hub.esp.stop()
 
 
+class TestFirstBootAPSetupPortal(unittest.IsolatedAsyncioTestCase):
+    """Tests for FirstBootAPPortal: AP hotspot, Wi-Fi scan parsing, required user+wifi, and skippable optional fields."""
+
+    async def test_first_boot_ap_portal_required_and_skippable_fields(self) -> None:
+        from pi_hub.first_boot_setup import FirstBootAPPortal, parse_nmcli_wifi_scan
+
+        # 1. nmcli terse output parsing (escaped colons + dedupe strongest RSSI)
+        raw_scan = (
+            "HomeNet:5G:40:WPA2\n"
+            "My\\:Cafe\\:WiFi:75:WPA2\n"
+            "HomeWiFi:55:WPA2\n"
+            "HomeWiFi:92:WPA2\n"
+            ":30:WPA2\n"
+        )
+        parsed = parse_nmcli_wifi_scan(raw_scan)
+        self.assertEqual(parsed[0]["ssid"], "HomeWiFi")
+        self.assertEqual(parsed[0]["signal"], 92)
+        self.assertEqual(parsed[1]["ssid"], "My:Cafe:WiFi")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sentinel = tmp_path / "firstboot.done"
+            ixian_cfg = tmp_path / "ixian.cfg"
+            ixian_cfg.write_text("apiPort = 8001\nwalletPassword = REPLACE_ME\n", encoding="utf-8")
+            hub_cfg = tmp_path / "config.yaml"
+            hub_cfg.write_text("quixi:\n  server_ixian_address: 1ReplaceMe\n", encoding="utf-8")
+
+            executed: list[tuple[list[str], str | None]] = []
+
+            async def fake_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+                executed.append((cmd, stdin_txt))
+                if cmd[:2] == ["id", "-u"]:
+                    return 1, "", "no such user"
+                if cmd[:4] == ["nmcli", "-t", "-f", "SSID,SIGNAL,SECURITY"]:
+                    return 0, raw_scan, ""
+                return 0, "", ""
+
+            portal = FirstBootAPPortal(
+                host="127.0.0.1",
+                port=0,
+                sentinel_path=sentinel,
+                ixian_cfg_path=ixian_cfg,
+                hub_cfg_path=hub_cfg,
+                cmd_runner=fake_runner,
+                dry_run=False,
+            )
+            self.assertTrue(portal.is_first_boot_needed())
+
+            # 2. Start AP mode & HTTP server
+            ap_ok, _ = await portal.start_ap_mode()
+            self.assertTrue(ap_ok)
+            self.assertTrue(portal.ap_active)
+            bound_port = await portal.start()
+            try:
+                # 3. Validation rejects missing username, short password, or missing wifi_ssid
+                code, bad_u = await portal.handle_api_request(
+                    "POST",
+                    "/api/setup/apply",
+                    body={"username": "", "password": "secret", "wifi_ssid": "HomeWiFi"},
+                )
+                self.assertEqual(code, 400)
+                self.assertIn("username", bad_u["error"])
+
+                code, bad_w = await portal.handle_api_request(
+                    "POST",
+                    "/api/setup/apply",
+                    body={"username": "alex", "password": "secret123", "wifi_ssid": ""},
+                )
+                self.assertEqual(code, 400)
+                self.assertIn("wifi_ssid", bad_w["error"])
+
+                # 4. Wi-Fi scan endpoint
+                code, scan_res = await portal.handle_api_request("GET", "/api/setup/wifi")
+                self.assertEqual(code, 200)
+                self.assertEqual(scan_res["networks"][0]["ssid"], "HomeWiFi")
+
+                # 5. Apply with ONLY required user + wifi (all optional fields skipped!)
+                code, ok_res = await portal.handle_api_request(
+                    "POST",
+                    "/api/setup/apply",
+                    body={
+                        "username": "alex",
+                        "password": "MyPiPassword!",
+                        "wifi_ssid": "HomeWiFi",
+                        "wifi_password": "WiFiPass123",
+                        "wifi_country": "DE",
+                        "enable_ssh": False,
+                    },
+                )
+                self.assertEqual(code, 200)
+                self.assertTrue(ok_res["ok"])
+                self.assertEqual(ok_res["username"], "alex")
+                self.assertEqual(ok_res["wifi_ssid"], "HomeWiFi")
+                self.assertIn("hostname", ok_res["skipped_optional"])
+                self.assertIn("quixi_wallet_password", ok_res["skipped_optional"])
+                self.assertIn("server_ixian_address", ok_res["skipped_optional"])
+                self.assertFalse(portal.ap_active)
+                self.assertFalse(portal.is_first_boot_needed())
+                self.assertTrue(portal.setup_complete_event.is_set())
+
+                # Sentinel must NOT store plaintext passwords
+                sentinel_txt = sentinel.read_text(encoding="utf-8")
+                self.assertNotIn("MyPiPassword!", sentinel_txt)
+                self.assertNotIn("WiFiPass123", sentinel_txt)
+
+                # Skipped optional configs remain untouched
+                self.assertIn("REPLACE_ME", ixian_cfg.read_text(encoding="utf-8"))
+                self.assertIn("1ReplaceMe", hub_cfg.read_text(encoding="utf-8"))
+
+                # Verify useradd, chpasswd, and nmcli wifi connect ran
+                self.assertTrue(any(c[0][:1] == ["useradd"] and "alex" in c[0] for c in executed))
+                self.assertTrue(any(c[0] == ["chpasswd"] and c[1] == "alex:MyPiPassword!\n" for c in executed))
+                self.assertTrue(
+                    any(c[0][:4] == ["nmcli", "device", "wifi", "connect"] and "HomeWiFi" in c[0] for c in executed)
+                )
+
+                # 6. Captive portal GET / serves setup HTML
+                reader, writer = await asyncio.open_connection("127.0.0.1", bound_port)
+                writer.write(b"GET /generate_204 HTTP/1.1\r\nHost: 192.168.4.1\r\n\r\n")
+                await writer.drain()
+                raw_html = await asyncio.wait_for(reader.read(), timeout=3.0)
+                writer.close()
+                self.assertIn(b"200 OK", raw_html)
+                self.assertIn(b"First-Boot Setup", raw_html)
+            finally:
+                await portal.stop()
+
+
 if __name__ == "__main__":
     unittest.main()
