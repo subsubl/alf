@@ -1492,13 +1492,22 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(hub.is_in_friend_call)
                     self.assertEqual(esp.sub, "Call: Alice")
 
-                    # Also test LLM sending a Spixi chat message by nickname and hanging up via tool
+                    # Also test LLM sending a dictated Spixi chat message by nickname and hanging up via tool
                     msg_res = await hub._run_single_tool(
                         "update_companion_settings",
                         {"spixi_action": "message", "contact_name": "Alice", "spixi_message": "On my way!"},
                     )
+                    await asyncio.sleep(0.03)
                     self.assertTrue(msg_res["ok"])
                     self.assertEqual(msg_res["spixi"]["address"], "1SpixiFriendAlice")
+                    self.assertEqual(esp.emo, "HAPPY")
+                    self.assertEqual(esp.sub, "To Alice: On my way!")
+                    self.assertTrue(
+                        any(
+                            e.get("topic") == "Chat/out" and e.get("summary") == "To Alice: On my way!"
+                            for e in hub.gui.quixi_event_log
+                        )
+                    )
 
                     hup_res = await hub._run_single_tool(
                         "update_companion_settings",

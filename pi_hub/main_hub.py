@@ -1002,6 +1002,15 @@ class PiCompanionHub:
                             await self.quixi.send_chat_message(target_addr, msg_text)
                         except Exception as exc:
                             return {"ok": False, "error": f"Failed to send Spixi message to {display_name}: {exc}"}
+                        sent_sub = f"To {display_name}: {msg_text}"[:180]
+                        await self.esp.set_state("HAPPY", sent_sub)
+                        if hasattr(self, "gui") and self.gui is not None:
+                            self.gui.update_face_state(emo="HAPPY", sub=sent_sub)
+                            self.gui.record_quixi_event(
+                                "Chat/out",
+                                {"sender": "self", "recipient": target_addr, "message": msg_text},
+                                summary=sent_sub,
+                            )
                         spixi_res = {
                             "ok": True,
                             "action": "message",

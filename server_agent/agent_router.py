@@ -195,7 +195,7 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
                     },
                     "spixi_message": {
                         "type": "string",
-                        "description": "Text message body when spixi_action='message'.",
+                        "description": "Dictated text message body to send when spixi_action='message'.",
                     },
                 },
             },
@@ -215,8 +215,10 @@ def build_default_system_prompt(companion_name: str = "Tamagci") -> str:
         "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags), "
         "interact with physical GPIO pins, QMI8658 motion/IMU sensors, and nearby BLE devices, "
         "inspect, hardware-reset, or reflash/update your ESP32-S3 LCD firmware via update_companion_settings, "
-        "and start Spixi voice calls or send messages to the user's Spixi contacts by nickname via update_companion_settings "
-        "(e.g. spixi_action='call', contact_name='Alice')."
+        "and start Spixi voice calls or send dictated messages to the user's Spixi contacts by nickname via update_companion_settings "
+        "(e.g. spixi_action='call', contact_name='Alice' or spixi_action='message', contact_name='Alice', spixi_message='...'). "
+        "If the user says they want to send a message to a contact without saying the message body yet, "
+        "first ask what they would like to say, wait for their dictated message, and then send it via update_companion_settings."
     )
 
 
