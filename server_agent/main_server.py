@@ -31,6 +31,7 @@ from common_ixian import QuIXIClient, SpixiVoIPSessionManager
 from common_ixian.quixi_client import _extract_b64_bytes, is_quixi_ok
 from server_agent.agent_router import AgentBrain
 from server_agent.speech_processor import SpeechProcessor, iter_audio_frames
+from server_agent.web_gui import ServerWebGUI
 
 logging.basicConfig(
     level=logging.INFO,
@@ -146,6 +147,16 @@ class ServerCompanionService:
         self._active_turn_target: Optional[str] = None
         self._last_imu_event_ts: Dict[str, float] = {}
 
+        self.web_ui_enabled: bool = (
+            os.getenv("WEB_UI_ENABLED", "true").strip().lower() in {"1", "true", "yes"}
+        )
+        self.gui = ServerWebGUI(
+            self,
+            host=os.getenv("WEB_UI_HOST", "127.0.0.1"),
+            port=int(os.getenv("WEB_UI_PORT", "8080")),
+            auth_token=os.getenv("WEB_UI_TOKEN", ""),
+        )
+
     def _is_authorized(self, sender: str) -> bool:
         sender = (sender or "").strip()
         if not self.pi_address or self.pi_address.startswith("1Replace"):
@@ -156,12 +167,15 @@ class ServerCompanionService:
         self.quixi.on_topic("AppProtocolData", self._on_app_protocol_data)
         self.quixi.on_topic("Chat", self._on_text_chat)
         await self.quixi.start()
+        if self.web_ui_enabled:
+            await self.gui.start()
         logger.info("Server Companion Service listening on QuIXI (MQTT + REST)...")
 
         try:
             while True:
                 await asyncio.sleep(3600)
         finally:
+            await self.gui.stop()
             await self.quixi.stop()
 
     async def _on_voip_started(self, contact: str, sid: bytes, codec: str) -> None:
@@ -586,11 +600,76 @@ class ServerCompanionService:
             logger.warning("ChatStream send failed: %s", exc)
             return False
 
+    async def run_web_chat_turn(
+        self,
+        user_text: str,
+        speak_on_companion: bool = False,
+        source: str = "web_gui",
+    ) -> Dict[str, Any]:
+        """Execute a chat turn initiated from the Server Web GUI or OpenAI-compatible /v1/chat/completions."""
+        target_addr = self._resolve_rpc_target() or self.pi_address
+        can_speak = bool(
+            speak_on_companion
+            and target_addr
+            and not target_addr.startswith("1Replace")
+        )
+        async with self._turn_lock:
+            if can_speak:
+                await self._run_agent_and_reply(target_addr, user_text, source=source)
+                tool_calls = list(getattr(self.brain, "last_turn_tool_calls", []) or [])
+                reply_text = ""
+                for m in reversed(getattr(self.brain, "history", []) or []):
+                    if isinstance(m, dict) and m.get("role") == "assistant" and not m.get("tool_calls"):
+                        reply_text = str(m.get("content", ""))
+                        break
+                emotion = getattr(self.brain, "last_emotion", "HAPPY")
+                return {
+                    "ok": True,
+                    "reply": reply_text,
+                    "emotion": emotion,
+                    "tool_calls": tool_calls,
+                    "spoken": True,
+                }
+
+            prev_target = getattr(self, "_active_turn_target", None)
+            self._active_turn_target = target_addr
+            try:
+                if hasattr(self, "gui") and self.gui is not None:
+                    self.gui.record_chat_turn("user", user_text, source=source)
+                    self.gui.update_face_state(emo="THINKING", sub="Thinking...")
+                reply_text, emotion = await self.brain.process_user_turn(user_text)
+                tool_calls = list(getattr(self.brain, "last_turn_tool_calls", []) or [])
+                if hasattr(self, "gui") and self.gui is not None:
+                    for tc in tool_calls:
+                        self.gui.record_tool_execution(
+                            tc.get("tool", ""),
+                            tc.get("args") or {},
+                            tc.get("result") or {},
+                        )
+                    self.gui.update_face_state(emo=emotion, sub=reply_text, mouth=0)
+                    self.gui.record_chat_turn(
+                        "assistant",
+                        reply_text,
+                        source=source,
+                        emotion=emotion,
+                        tool_calls=tool_calls,
+                    )
+                return {
+                    "ok": True,
+                    "reply": reply_text,
+                    "emotion": emotion,
+                    "tool_calls": tool_calls,
+                    "spoken": False,
+                }
+            finally:
+                self._active_turn_target = prev_target
+
     async def _run_agent_and_reply(
         self,
         target_addr: str,
         user_text: str,
         cancel_event: Optional[asyncio.Event] = None,
+        source: str = "voice",
     ) -> None:
         target_addr = (target_addr or "").strip()
         prev_target = getattr(self, "_active_turn_target", None)
@@ -598,11 +677,31 @@ class ServerCompanionService:
         cancel_event = self._register_cancel_event(target_addr, cancel_event)
 
         try:
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.record_chat_turn("user", user_text, source=source)
+                self.gui.update_face_state(emo="THINKING", sub="Thinking...")
+
             reply_text, emotion = await self.brain.process_user_turn(user_text)
             if cancel_event.is_set():
                 logger.info("Turn cancelled during LLM reasoning for %s", target_addr)
                 return
             logger.info("Agent reply (%s): %s", emotion, reply_text)
+
+            tool_calls = list(getattr(self.brain, "last_turn_tool_calls", []) or [])
+            if hasattr(self, "gui") and self.gui is not None:
+                for tc in tool_calls:
+                    self.gui.record_tool_execution(
+                        tc.get("tool", ""),
+                        tc.get("args") or {},
+                        tc.get("result") or {},
+                    )
+                self.gui.record_chat_turn(
+                    "assistant",
+                    reply_text,
+                    source=source,
+                    emotion=emotion,
+                    tool_calls=tool_calls,
+                )
 
             # 1. Stream live text subtitle over QuIXI ChatStream (SpixiMessageCode.CHAT_STREAM = 53)
             chat_stream_ok = await self._stream_chat_text(target_addr, reply_text, cancel_event)
@@ -619,6 +718,14 @@ class ServerCompanionService:
             if cancel_event.is_set():
                 logger.info("Turn cancelled before tts_meta for %s", target_addr)
                 return
+
+            if hasattr(self, "gui") and self.gui is not None:
+                self.gui.update_face_state(
+                    emo=emotion,
+                    sub=reply_text,
+                    mouth=envelope[0] if envelope else 0,
+                    envelope=envelope,
+                )
 
             if not pcm_16k:
                 try:

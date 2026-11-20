@@ -541,5 +541,249 @@ class TestServerCompanionService(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(svc._turn_lock.locked())
 
 
+class TestServerWebGUIAndOpenAIBridge(unittest.IsolatedAsyncioTestCase):
+    """Tests for Open WebUI-style ServerWebGUI dashboard, Hardware Workbench, WebSockets, and /v1 OpenAI Bridge."""
+
+    async def test_web_gui_rest_personas_workbench_secret_masking_and_auth(self) -> None:
+        svc, fake_ai, bus = _make_service_with_mocks(pi_addr="1RealPi")
+        svc.brain.client.api_key = "sk-supersecretkey999"
+        gui = svc.gui
+        gui.auth_token = "secret-admin-tok"
+
+        # 1. Unauthenticated requests are rejected with 401 when WEB_UI_TOKEN is set
+        code, body = await gui.handle_api_request("GET", "/api/status")
+        self.assertEqual(code, 401)
+
+        auth_hdr = {"Authorization": "Bearer secret-admin-tok"}
+
+        # 2. Secret masking on GET /api/settings (never leaks raw API key)
+        code, settings = await gui.handle_api_request("GET", "/api/settings", headers=auth_hdr)
+        self.assertEqual(code, 200)
+        self.assertIn("***", settings["llm_api_key_masked"])
+        self.assertNotIn("supersecretkey", json.dumps(settings))
+
+        # 3. Runtime settings update
+        code, updated = await gui.handle_api_request(
+            "POST",
+            "/api/settings",
+            body={"llm_model": "gpt-4.1-mini", "tts_voice": "nova", "companion_name": "Alf"},
+            headers=auth_hdr,
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(svc.brain.model, "gpt-4.1-mini")
+        self.assertEqual(svc.speech.tts_voice, "nova")
+
+        # 4. Personas / Modelfiles selection and custom persona creation
+        code, p_list = await gui.handle_api_request("GET", "/api/personas", headers=auth_hdr)
+        self.assertEqual(code, 200)
+        self.assertGreaterEqual(len(p_list["personas"]), 3)
+
+        code, sel = await gui.handle_api_request(
+            "POST",
+            "/api/personas/select",
+            body={"persona_id": "alf-engineer"},
+            headers=auth_hdr,
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(gui.active_persona_id, "alf-engineer")
+        self.assertEqual(svc.speech.tts_voice, "echo")
+
+        code, custom_p = await gui.handle_api_request(
+            "POST",
+            "/api/personas",
+            body={
+                "id": "alf-pirate",
+                "name": "Alf — Space Pirate",
+                "companion_name": "CaptainAlf",
+                "default_emotion": "SURPRISED",
+                "tts_voice": "fable",
+                "activate": True,
+            },
+            headers=auth_hdr,
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(gui.active_persona_id, "alf-pirate")
+        self.assertEqual(svc.brain.companion_name, "CaptainAlf")
+
+        # 5. Hardware Workbench direct tool invocation & telemetry cache update
+        async def fake_rpc(tool_name: str, args: dict) -> dict:
+            if tool_name == "gpio_read_pin":
+                return {"ok": 1, "pin": args["pin"], "val": 1, "vbat_mv": 4125}
+            if tool_name == "read_imu_motion":
+                return {"ok": 1, "ax": 0.1, "ay": -0.2, "az": 9.8, "temp": 33.5, "gest": "none"}
+            if tool_name == "scan_ble_environment":
+                return {"ok": 1, "cnt": 1, "ble": [{"mac": "AA:BB:CC:DD:EE:FF", "rssi": -55}]}
+            return {"ok": 1}
+
+        with patch.object(svc, "_call_pi_tool_rpc", side_effect=fake_rpc):
+            code, res_gpio = await gui.handle_api_request(
+                "POST",
+                "/api/hardware/tool",
+                body={"tool": "gpio_read_pin", "args": {"pin": 16}},
+                headers=auth_hdr,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(gui.telemetry["vbat_mv"], 4125)
+            self.assertEqual(gui.telemetry["gpio_pins"]["16"]["val"], 1)
+
+            await gui.handle_api_request(
+                "POST",
+                "/api/hardware/tool",
+                body={"tool": "read_imu_motion", "args": {}},
+                headers=auth_hdr,
+            )
+            self.assertEqual(gui.telemetry["imu"]["temp"], 33.5)
+
+            await gui.handle_api_request(
+                "POST",
+                "/api/hardware/tool",
+                body={"tool": "scan_ble_environment", "args": {}},
+                headers=auth_hdr,
+            )
+            self.assertEqual(len(gui.telemetry["ble"]), 1)
+
+            # 6. Web Chat turn with hardware tool execution + history clear
+            svc.brain.rpc_call = fake_rpc
+            fake_ai.chat_script.append(
+                types.SimpleNamespace(
+                    content="",
+                    tool_calls=[make_tool_call("tc1", "gpio_read_pin", {"pin": 16})],
+                )
+            )
+            fake_ai.chat_script.append(
+                types.SimpleNamespace(
+                    content="[EMO:HAPPY] Pin 16 is HIGH and battery is 4125 mV!",
+                    tool_calls=None,
+                )
+            )
+            code, chat_res = await gui.handle_api_request(
+                "POST",
+                "/api/chat",
+                body={"message": "Check pin 16 and battery", "speak_on_companion": False},
+                headers=auth_hdr,
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(chat_res["emotion"], "HAPPY")
+            self.assertIn("4125 mV", chat_res["reply"])
+            self.assertEqual(len(chat_res["tool_calls"]), 1)
+            self.assertEqual(chat_res["tool_calls"][0]["tool"], "gpio_read_pin")
+
+            code, hist = await gui.handle_api_request("DELETE", "/api/history", headers=auth_hdr)
+            self.assertEqual(code, 200)
+            self.assertEqual(hist["history"], [])
+
+    async def test_live_http_sse_websocket_and_openai_v1_bridge(self) -> None:
+        """Verify live TCP HTTP server, /v1/models, /v1/chat/completions (JSON + SSE stream), and RFC 6455 WebSocket."""
+        svc, fake_ai, bus = _make_service_with_mocks(pi_addr="1RealPi")
+        gui = svc.gui
+        gui.host = "127.0.0.1"
+        gui.port = 0  # Ephemeral local port
+        gui.auth_token = ""
+
+        port = await gui.start()
+        self.assertGreater(port, 0)
+        try:
+            # 1. GET / serves Open WebUI-inspired dashboard HTML
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            await writer.drain()
+            raw_html = await asyncio.wait_for(reader.read(), timeout=3.0)
+            writer.close()
+            self.assertIn(b"HTTP/1.1 200 OK", raw_html)
+            self.assertIn(b"Alf \xc2\xb7 Control Center", raw_html)
+            self.assertIn(b"faceCanvas", raw_html)
+
+            # 2. GET /v1/models lists OpenAI-compatible persona models
+            code, models_res = await gui.handle_api_request("GET", "/v1/models")
+            self.assertEqual(code, 200)
+            self.assertEqual(models_res["object"], "list")
+            model_ids = {m["id"] for m in models_res["data"]}
+            self.assertIn("alf-companion", model_ids)
+            self.assertIn("alf-engineer", model_ids)
+
+            # 3. POST /v1/chat/completions (stream: false)
+            fake_ai.chat_script.append(
+                types.SimpleNamespace(content="[EMO:SURPRISED] Hello from Open WebUI bridge!", tool_calls=None)
+            )
+            code, cmpl = await gui.handle_api_request(
+                "POST",
+                "/v1/chat/completions",
+                body={
+                    "model": "alf-companion",
+                    "messages": [{"role": "user", "content": "Hi Alf!"}],
+                    "stream": False,
+                },
+            )
+            self.assertEqual(code, 200)
+            self.assertEqual(cmpl["object"], "chat.completion")
+            self.assertEqual(cmpl["choices"][0]["message"]["content"], "Hello from Open WebUI bridge!")
+            self.assertEqual(cmpl["alf_meta"]["emotion"], "SURPRISED")
+
+            # 4. POST /v1/chat/completions (stream: true) over real TCP SSE stream
+            fake_ai.chat_script.append(
+                types.SimpleNamespace(content="[EMO:HAPPY] Streaming chunk reply!", tool_calls=None)
+            )
+            sse_body = json.dumps(
+                {
+                    "model": "alf-companion",
+                    "messages": [{"role": "user", "content": "Stream please"}],
+                    "stream": True,
+                }
+            ).encode("utf-8")
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            req = (
+                f"POST /v1/chat/completions HTTP/1.1\r\n"
+                f"Host: 127.0.0.1\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(sse_body)}\r\n\r\n"
+            ).encode("latin-1") + sse_body
+            writer.write(req)
+            await writer.drain()
+            raw_sse = (await asyncio.wait_for(reader.read(), timeout=3.0)).decode("utf-8")
+            writer.close()
+            self.assertIn("text/event-stream", raw_sse)
+            self.assertIn("chat.completion.chunk", raw_sse)
+            self.assertIn("Streaming", raw_sse)
+            self.assertIn("data: [DONE]", raw_sse)
+
+            # 5. RFC 6455 WebSocket handshake + live face_state broadcast on /api/ws
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            ws_req = (
+                "GET /api/ws HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                "Sec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("latin-1")
+            writer.write(ws_req)
+            await writer.drain()
+
+            # Read HTTP 101 headers
+            hdr_lines = b""
+            while not hdr_lines.endswith(b"\r\n\r\n"):
+                chunk = await asyncio.wait_for(reader.read(1), timeout=2.0)
+                if not chunk:
+                    break
+                hdr_lines += chunk
+            self.assertIn(b"101 Switching Protocols", hdr_lines)
+            self.assertIn(b"s3pPLMBiTxaQ9kYGzzhZRbK+xOo=", hdr_lines)
+
+            # Read initial WebSocket frame ('init' snapshot)
+            b1, b2 = await asyncio.wait_for(reader.readexactly(2), timeout=2.0)
+            self.assertEqual(b1 & 0x0F, 0x1)  # text frame
+            length = b2 & 0x7F
+            if length == 126:
+                (length,) = struct.unpack("!H", await reader.readexactly(2))
+            elif length == 127:
+                (length,) = struct.unpack("!Q", await reader.readexactly(8))
+            init_payload = json.loads((await reader.readexactly(length)).decode("utf-8"))
+            self.assertEqual(init_payload["type"], "init")
+            self.assertTrue(init_payload["data"]["ok"])
+            writer.close()
+        finally:
+            await gui.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

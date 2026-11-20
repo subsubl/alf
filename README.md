@@ -71,9 +71,14 @@ flowchart LR
 - Instant zero-latency local earcon chimes (`awake`, `done`, `error` — built-in synthesized 16 kHz chimes or custom `.wav` files) and a Bluetooth PortAudio stream watchdog (`check_and_heal_streams`) that automatically recovers when a BT headset/speaker power-cycles.
 - Executes `tool_call` / `tool_batch` hardware RPCs from the agent against Tier 1.
 
-**Tier 3 — `server_agent`**
+**Tier 3 — `server_agent` (with Open WebUI-Inspired Control Center & `/v1` Bridge)**
 - OpenAI-compatible STT (`/v1/audio/transcriptions`), chat with six dynamic hardware tools (`/v1/chat/completions`) and tool-call-safe history trimming, and TTS (`/v1/audio/speech`).
 - Returns synced `ChatStream` text, 20 Hz viseme envelopes and audio frames over Spixi VoIP.
+- **Built-in Web GUI (`server_agent/web_gui.py`, default `http://127.0.0.1:8080`)**:
+  - **Live 240×240 Round ESP32-S3 Face Canvas** synchronized over WebSockets (`/api/ws`) & SSE (`/api/events`) with real-time emotions, 20 Hz visemes, and subtitles.
+  - **Streaming Chat + Collapsible Hardware Tool Call Inspector** + **"Speak on Companion"** toggle (synthesizes TTS and speaks replies aloud on the physical Pi + ESP32).
+  - **Workspace Personas (`alf-companion`, `alf-engineer`, `alf-sentry`, or custom)** + **Interactive Hardware Workbench Drawer** (toggle allow-listed GPIOs, read `Vbat` mV, poll QMI8658 6-axis IMU, scan BLE radar, adjust brightness/volume/mic mode).
+  - **OpenAI-Compatible Bridge (`GET /v1/models`, `POST /v1/chat/completions` JSON & SSE `stream: true`)**: Point any external **Open WebUI** instance at `http://<server>:8080/v1` to chat with Alf and trigger real ESP32/Pi hardware tools from Open WebUI.
 
 ## Repository layout
 

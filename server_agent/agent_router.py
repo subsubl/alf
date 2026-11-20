@@ -169,6 +169,20 @@ AGENT_TOOLS: List[Dict[str, Any]] = [
 ]
 
 
+ALLOWLIST_PINS: List[int] = [15, 16, 17, 18, 21, 33, 34, 35, 36, 37]
+
+
+def build_default_system_prompt(companion_name: str = "Tamagci") -> str:
+    return (
+        f"You are {companion_name}, an embodied AI companion running inside a round Waveshare ESP32-S3 "
+        "face display tethered via USB to a Raspberry Pi Zero 2 W and Bluetooth speaker/microphone. "
+        "Keep spoken replies concise, conversational, and natural for voice output (usually 1-3 short sentences). "
+        "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags) "
+        "and interact with physical GPIO pins, QMI8658 motion/IMU sensors, "
+        "and nearby BLE devices using your tools."
+    )
+
+
 class AgentBrain:
     """Manages LLM dialogue history and iterative OpenAI tool-calling against remote hardware."""
 
@@ -190,24 +204,20 @@ class AgentBrain:
                 raise RuntimeError("openai package is required when no client is provided")
             self.client = AsyncOpenAI(base_url=llm_base_url, api_key=llm_api_key)
         self.model = llm_model
+        self.companion_name = companion_name
         self.rpc_call = rpc_call_fn
         self.rpc_batch = rpc_batch_fn
         self.max_history = max(0, int(max_history_messages))
         self.last_emotion = "HAPPY"
+        self.last_turn_tool_calls: List[Dict[str, Any]] = []
 
-        self.system_prompt = (
-            f"You are {companion_name}, an embodied AI companion running inside a round Waveshare ESP32-S3 "
-            "face display tethered via USB to a Raspberry Pi Zero 2 W and Bluetooth speaker/microphone. "
-            "Keep spoken replies concise, conversational, and natural for voice output (usually 1-3 short sentences). "
-            "You can express emotions on your face (via set_companion_emotion or optional [EMO:HAPPY|SAD|SURPRISED|ALERT|SLEEPING|IDLE] tags) "
-            "and interact with physical GPIO pins, QMI8658 motion/IMU sensors, "
-            "and nearby BLE devices using your tools."
-        )
+        self.system_prompt = build_default_system_prompt(companion_name)
         self.history: List[Dict[str, Any]] = []
 
     def reset(self) -> None:
         """Clear dialogue history and reset current emotion."""
         self.history.clear()
+        self.last_turn_tool_calls.clear()
         self.last_emotion = "HAPPY"
 
     def _trim_history(self) -> None:
@@ -237,6 +247,7 @@ class AgentBrain:
         self.history.append({"role": "user", "content": user_text})
         self._trim_history()
         self.last_emotion = "HAPPY"
+        self.last_turn_tool_calls = []
 
         for _ in range(6):  # max 6 tool-call rounds per turn
             messages = [{"role": "system", "content": self.system_prompt}, *self.history]
@@ -357,6 +368,15 @@ class AgentBrain:
 
             for idx, tc in enumerate(msg.tool_calls):
                 result = results_by_idx.get(idx, {"ok": False, "error": "Tool execution skipped"})
+                call_info = parsed_calls[idx] if idx < len(parsed_calls) else {"id": tc.id, "tool": tc.function.name, "args": {}}
+                self.last_turn_tool_calls.append(
+                    {
+                        "id": tc.id,
+                        "tool": call_info["tool"],
+                        "args": call_info["args"],
+                        "result": result,
+                    }
+                )
                 self.history.append(
                     {
                         "role": "tool",
