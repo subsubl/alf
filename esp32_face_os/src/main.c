@@ -45,6 +45,11 @@ static void on_dbg_ble_refresh_cb(void)
     serial_send_ble_evt();
 }
 
+static void on_net_refresh_cb(void)
+{
+    serial_send_json("{\"t\":\"evt\",\"src\":\"net\",\"act\":\"refresh\"}");
+}
+
 int main(void)
 {
     /* 1. Initialize Display & LVGL UI (PWM backlight GPIO 2 initialized in ui_screens_init) */
@@ -58,6 +63,7 @@ int main(void)
         .on_cfg_change = on_cfg_change_cb,
         .on_dbg_test_call = on_dbg_test_call_cb,
         .on_dbg_ble_refresh = on_dbg_ble_refresh_cb,
+        .on_net_refresh = on_net_refresh_cb,
     };
     ui_screens_init(&ui_cbs);
     lv_task_handler();

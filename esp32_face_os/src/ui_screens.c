@@ -26,6 +26,7 @@ static ui_callbacks_t g_cbs;
 static lv_obj_t *scr_face;
 static lv_obj_t *scr_settings;
 static lv_obj_t *scr_debug;
+static lv_obj_t *scr_network;
 static lv_obj_t *wake_shield;
 static int current_screen_idx;
 
@@ -66,6 +67,13 @@ static lv_obj_t *dbg_imu_lbl;
 static lv_obj_t *dbg_ble_lbl;
 static lv_obj_t *dbg_gpio_lbl;
 static lv_obj_t *dbg_sys_lbl;
+
+/* Network / Ixian identity screen widgets */
+static lv_obj_t *net_ip_lbl;
+static lv_obj_t *net_gui_lbl;
+static lv_obj_t *net_ixi_lbl;
+static char net_rpi_ip[48] = "waiting DHCP...";
+static char net_ixian_addr[96] = "waiting QuIXI wallet...";
 
 /* Procedural face animation state */
 static face_emotion_t g_emotion = FACE_IDLE;
@@ -178,16 +186,18 @@ static void update_4step_rotation(void)
 
 static void switch_to_screen(int idx)
 {
-    if (idx < 0) idx = 2;
-    if (idx > 2) idx = 0;
+    if (idx < 0) idx = 3;
+    if (idx > 3) idx = 0;
     current_screen_idx = idx;
 
     if (idx == 0) {
         lv_scr_load_anim(scr_face, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
     } else if (idx == 1) {
         lv_scr_load_anim(scr_settings, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
-    } else {
+    } else if (idx == 2) {
         lv_scr_load_anim(scr_debug, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
+    } else {
+        lv_scr_load_anim(scr_network, LV_SCR_LOAD_ANIM_FADE_ON, 120, 0, false);
     }
 }
 
@@ -900,6 +910,68 @@ static void build_debug_screen(void)
     lv_obj_center(lb);
 }
 
+static void net_refresh_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    if (g_cbs.on_net_refresh) {
+        g_cbs.on_net_refresh();
+    }
+}
+
+static void build_network_screen(void)
+{
+    scr_network = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(scr_network, lv_color_hex(0x090D16), 0);
+    add_nav_header(scr_network, "NETWORK");
+
+    net_ip_lbl = lv_label_create(scr_network);
+    lv_obj_set_style_text_color(net_ip_lbl, lv_color_hex(0x34D399), 0);
+    lv_obj_set_style_text_font(net_ip_lbl, &lv_font_montserrat_14, 0);
+    lv_label_set_text(net_ip_lbl, "RPi IP: waiting DHCP...");
+    lv_obj_align(net_ip_lbl, LV_ALIGN_TOP_MID, 0, 52);
+
+    net_gui_lbl = lv_label_create(scr_network);
+    lv_obj_set_style_text_color(net_gui_lbl, lv_color_hex(0x93C5FD), 0);
+    lv_obj_set_style_text_font(net_gui_lbl, &lv_font_montserrat_12, 0);
+    lv_label_set_text(net_gui_lbl, "GUI: http://--:8082");
+    lv_obj_align(net_gui_lbl, LV_ALIGN_TOP_MID, 0, 74);
+
+    lv_obj_t *ixi_hdr = lv_label_create(scr_network);
+    lv_obj_set_style_text_color(ixi_hdr, lv_color_hex(0xFBBF24), 0);
+    lv_obj_set_style_text_font(ixi_hdr, &lv_font_montserrat_12, 0);
+    lv_label_set_text(ixi_hdr, "Ixian Wallet Address:");
+    lv_obj_align(ixi_hdr, LV_ALIGN_TOP_MID, 0, 94);
+
+    lv_obj_t *ixi_box = lv_obj_create(scr_network);
+    lv_obj_set_size(ixi_box, 196, 62);
+    lv_obj_align(ixi_box, LV_ALIGN_TOP_MID, 0, 112);
+    lv_obj_set_style_bg_color(ixi_box, lv_color_hex(0x111827), 0);
+    lv_obj_set_style_border_color(ixi_box, lv_color_hex(0x38BDF8), 0);
+    lv_obj_set_style_border_width(ixi_box, 1, 0);
+    lv_obj_set_style_radius(ixi_box, 8, 0);
+    lv_obj_set_style_pad_all(ixi_box, 6, 0);
+    lv_obj_clear_flag(ixi_box, LV_OBJ_FLAG_SCROLLABLE);
+
+    net_ixi_lbl = lv_label_create(ixi_box);
+    lv_obj_set_width(net_ixi_lbl, 182);
+    lv_label_set_long_mode(net_ixi_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(net_ixi_lbl, lv_color_hex(0xF8FAFC), 0);
+    lv_obj_set_style_text_font(net_ixi_lbl, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_align(net_ixi_lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(net_ixi_lbl, net_ixian_addr);
+    lv_obj_center(net_ixi_lbl);
+
+    lv_obj_t *btn_ref = lv_btn_create(scr_network);
+    lv_obj_set_size(btn_ref, 108, 26);
+    lv_obj_align(btn_ref, LV_ALIGN_BOTTOM_MID, 0, -24);
+    lv_obj_set_style_bg_color(btn_ref, lv_color_hex(0x2563EB), 0);
+    lv_obj_add_event_cb(btn_ref, net_refresh_cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *lr = lv_label_create(btn_ref);
+    lv_label_set_text(lr, "Refresh Info");
+    lv_obj_set_style_text_font(lr, &lv_font_montserrat_12, 0);
+    lv_obj_center(lr);
+}
+
 /* ============================================================================
  * Public API
  * ============================================================================ */
@@ -913,6 +985,7 @@ void ui_screens_init(const ui_callbacks_t *cbs)
     build_face_screen();
     build_settings_screen();
     build_debug_screen();
+    build_network_screen();
 
     wake_shield = lv_obj_create(lv_layer_top());
     lv_obj_set_size(wake_shield, 240, 240);
@@ -1124,6 +1197,31 @@ void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const c
     }
     if (rtt_ms != INT_MIN) {
         link_rtt_ms = (rtt_ms >= 0) ? rtt_ms : -1;
+    }
+}
+
+void ui_set_network_info(const char *rpi_ip, const char *ixian_addr)
+{
+    if (rpi_ip && rpi_ip[0]) {
+        strncpy(net_rpi_ip, rpi_ip, sizeof(net_rpi_ip) - 1);
+        net_rpi_ip[sizeof(net_rpi_ip) - 1] = '\0';
+        if (net_ip_lbl) {
+            char buf[80];
+            snprintf(buf, sizeof(buf), "RPi IP: %s", net_rpi_ip);
+            lv_label_set_text(net_ip_lbl, buf);
+        }
+        if (net_gui_lbl) {
+            char gbuf[80];
+            snprintf(gbuf, sizeof(gbuf), "GUI: http://%s:8082", net_rpi_ip);
+            lv_label_set_text(net_gui_lbl, gbuf);
+        }
+    }
+    if (ixian_addr && ixian_addr[0]) {
+        strncpy(net_ixian_addr, ixian_addr, sizeof(net_ixian_addr) - 1);
+        net_ixian_addr[sizeof(net_ixian_addr) - 1] = '\0';
+        if (net_ixi_lbl) {
+            lv_label_set_text(net_ixi_lbl, net_ixian_addr);
+        }
     }
 }
 

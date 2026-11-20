@@ -326,7 +326,7 @@ class TestFirmwareAndCrossTierContracts(unittest.TestCase):
 
     def test_serial_proto_c_contracts(self) -> None:
         c_text = (_REPO_ROOT / "esp32_face_os/src/serial_proto.c").read_text(encoding="utf-8")
-        for cmd in ("ping", "state", "sync", "mouth", "dbg", "cfg", "gpio_cfg", "gpio_set", "gpio_get", "ble_get", "imu_get"):
+        for cmd in ("ping", "state", "sync", "mouth", "dbg", "net", "cfg", "gpio_cfg", "gpio_set", "gpio_get", "ble_get", "imu_get"):
             self.assertIn(f'"{cmd}"', c_text)
         self.assertNotIn("(pin >= 0) ? gpio_agent_get(pin, &val) : 0", c_text)
         self.assertIn("-EINVAL", c_text)
@@ -354,8 +354,10 @@ class TestFirmwareAndCrossTierContracts(unittest.TestCase):
     def test_ui_screens_c_contracts(self) -> None:
         ui_h = (_REPO_ROOT / "esp32_face_os/src/ui_screens.h").read_text(encoding="utf-8")
         ui_c = (_REPO_ROOT / "esp32_face_os/src/ui_screens.c").read_text(encoding="utf-8")
-        for scr in ("scr_face", "scr_settings", "scr_debug"):
+        for scr in ("scr_face", "scr_settings", "scr_debug", "scr_network"):
             self.assertIn(scr, ui_c)
+        self.assertIn("ui_set_network_info", ui_h)
+        self.assertIn("ui_set_network_info", ui_c)
         self.assertIn("LV_EVENT_GESTURE", ui_c)
         for emo in EMOTIONS_9:
             self.assertIn(f"FACE_{emo}", ui_h)

@@ -224,6 +224,8 @@ class EspSerialBridge:
         voip: Optional[str] = None,
         srv_ms: Optional[int] = None,
         bt_spk: Optional[str] = None,
+        ip: Optional[str] = None,
+        ixi: Optional[str] = None,
     ) -> None:
         pkt: Dict[str, Any] = {"t": "dbg"}
         if quixi is not None:
@@ -234,7 +236,31 @@ class EspSerialBridge:
             pkt["srv_ms"] = int(srv_ms)
         if bt_spk is not None:
             pkt["bt_spk"] = bt_spk
+        if ip is not None:
+            pkt["ip"] = str(ip)[:47]
+        if ixi is not None:
+            pkt["ixi"] = str(ixi)[:95]
         await self.send(pkt)
+
+    async def set_net_info(
+        self,
+        ip: Optional[str] = None,
+        ixi: Optional[str] = None,
+        wait_res: bool = False,
+        timeout: float = 3.0,
+    ) -> Dict[str, Any]:
+        """Push Raspberry Pi DHCP IP address and QuIXI Ixian wallet address to the ESP32-S3 Network screen."""
+        pkt: Dict[str, Any] = {"t": "net"}
+        if ip is not None:
+            pkt["ip"] = str(ip)[:47]
+        if ixi is not None:
+            pkt["ixi"] = str(ixi)[:95]
+        if len(pkt) == 1:
+            return {"ok": 1}
+        if wait_res:
+            return await self.request(pkt, timeout=timeout)
+        ok = await self.send(pkt)
+        return {"ok": 1 if ok else 0}
 
     async def set_cfg(
         self,

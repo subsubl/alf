@@ -63,7 +63,7 @@ flowchart LR
 ### Tier 1 — `esp32_face_os` (Zephyr 3.7 LTS + LVGL 8.4)
 - 240×240 GC9A01 round display with a procedural vector face: 9 emotions (`IDLE`, `LISTENING`, `THINKING`, `SPEAKING`, `HAPPY`, `SAD`, `SURPRISED`, `SLEEPING`, `ALERT`), blinking, gaze, 20 Hz viseme lip-sync and rolling live subtitles.
 - Fast 4-step hardware rotation (0°/90°/180°/270° via panel MADCTL) driven by the IMU, with touch coordinates rotated to match.
-- Three screens (swipe or `<`/`>`): **Face** (tap = push-to-talk / barge-in), **Settings** (brightness, volume, mic mode `vad`/`ptt`/`duplex`/`wake`, rotation mode, BLE toggle, sleep timeout), **Debug** (link status, IMU, BLE, GPIO, battery, heap).
+- Four screens (swipe or `<`/`>`): **Face** (tap = push-to-talk / barge-in), **Settings** (brightness, volume, mic mode `vad`/`ptt`/`duplex`/`wake`, rotation mode, BLE toggle, sleep timeout), **Debug** (link status, IMU, BLE, GPIO, battery, heap), and **Network** (Raspberry Pi DHCP IPv4 address, Pi Web GUI URL, and full QuIXI Ixian cryptographic wallet address with one-tap `Refresh Info`).
 - QMI8658 IMU on a dedicated 50 Hz thread: `shake`, `tilt`, `pickup`, `double_tap`.
 - BLE passive observer (32 entries, stale pruning).
 - Agent-controlled GPIO on allow-listed header pins (`15, 16, 17, 18, 21, 33, 34, 35, 36, 37`) plus battery ADC on `GPIO 1`; protected pins return `-EACCES`, bad arguments `-EINVAL`.

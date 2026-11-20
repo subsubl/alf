@@ -410,9 +410,13 @@ static void handle_json_line(const char *line)
         char quixi[16] = {0};
         char voip[16] = {0};
         char bt_spk[16] = {0};
+        char ip[48] = {0};
+        char ixi[96] = {0};
         json_get_str(line, "quixi", quixi, sizeof(quixi));
         json_get_str(line, "voip", voip, sizeof(voip));
         json_get_str(line, "bt_spk", bt_spk, sizeof(bt_spk));
+        json_get_str(line, "ip", ip, sizeof(ip));
+        json_get_str(line, "ixi", ixi, sizeof(ixi));
         int rtt = INT_MIN;
         if (json_get_int_ex(line, "srv_ms", &rtt)) {
             if (rtt < 0) {
@@ -423,6 +427,22 @@ static void handle_json_line(const char *line)
                            voip[0] ? voip : NULL,
                            rtt,
                            bt_spk[0] ? bt_spk : NULL);
+        if (ip[0] || ixi[0]) {
+            ui_set_network_info(ip[0] ? ip : NULL, ixi[0] ? ixi : NULL);
+        }
+    } else if (strcmp(type, "net") == 0) {
+        char ip[48] = {0};
+        char ixi[96] = {0};
+        json_get_str(line, "ip", ip, sizeof(ip));
+        if (!json_get_str(line, "ixi", ixi, sizeof(ixi))) {
+            json_get_str(line, "addr", ixi, sizeof(ixi));
+        }
+        ui_set_network_info(ip[0] ? ip : NULL, ixi[0] ? ixi : NULL);
+        if (id[0] != '\0') {
+            char resp[96];
+            snprintf(resp, sizeof(resp), "{\"t\":\"res\",\"id\":\"%s\",\"ok\":1}", id);
+            serial_send_json(resp);
+        }
     } else if (strcmp(type, "cfg") == 0) {
         int bright = -1;
         int vol = -1;

@@ -1189,6 +1189,8 @@ class MockESP32:
         self.ble_en = 1
         self.sleep_s = 120
         self.angle = 0
+        self.net_ip = "waiting DHCP..."
+        self.net_ixi = "waiting QuIXI wallet..."
         self.dbg: Dict[str, Any] = {"quixi": "OFF", "voip": "IDLE", "srv_ms": 0, "bt_spk": "OK"}
         self.gpio_dirs: Dict[int, str] = {}
         self.gpio_pulls: Dict[int, str] = {}
@@ -1289,6 +1291,19 @@ class MockESP32:
             srv_ms = _safe_int(cmd.get("srv_ms"))
             if srv_ms is not None:
                 self.dbg["srv_ms"] = srv_ms if srv_ms >= 0 else -1
+            if "ip" in cmd and isinstance(cmd["ip"], str) and cmd["ip"]:
+                self.net_ip = cmd["ip"][:47]
+            if "ixi" in cmd and isinstance(cmd["ixi"], str) and cmd["ixi"]:
+                self.net_ixi = cmd["ixi"][:95]
+
+        elif t == "net":
+            if "ip" in cmd and isinstance(cmd["ip"], str) and cmd["ip"]:
+                self.net_ip = cmd["ip"][:47]
+            ixi_val = cmd.get("ixi") if isinstance(cmd.get("ixi"), str) else cmd.get("addr")
+            if isinstance(ixi_val, str) and ixi_val:
+                self.net_ixi = ixi_val[:95]
+            if req_id:
+                self._send_resp(port, {"t": "res", "id": req_id, "ok": 1})
 
         elif t == "cfg":
             bright = _safe_int(cmd.get("bright"))

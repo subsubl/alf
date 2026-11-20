@@ -12,6 +12,7 @@ import base64
 import collections
 import json
 import logging
+import socket
 import sys
 import time
 from pathlib import Path
@@ -35,6 +36,27 @@ logging.basicConfig(
 logger = logging.getLogger("pi_hub")
 
 AGENT_PROTOCOL_ID = "com.tamagci.agent"
+
+
+def detect_local_dhcp_ip() -> str:
+    """Discover the Raspberry Pi's primary active LAN/Wi-Fi DHCP IPv4 address."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.settimeout(0.2)
+            s.connect(("10.255.255.255", 1))
+            ip = str(s.getsockname()[0])
+            if ip and not ip.startswith("127."):
+                return ip
+    except Exception:
+        pass
+    try:
+        _, _, ips = socket.gethostbyname_ex(socket.gethostname())
+        for cand in ips:
+            if cand and not cand.startswith("127."):
+                return cand
+    except Exception:
+        pass
+    return "127.0.0.1"
 
 
 class PiCompanionHub:
@@ -108,6 +130,8 @@ class PiCompanionHub:
         self._current_tts_turn_id: Optional[str] = None
         self._interrupted_turn_ids: Deque[str] = collections.deque(maxlen=16)
         self._superseded_chat_stream_ids: Deque[str] = collections.deque(maxlen=16)
+        self._pi_dhcp_ip: str = "127.0.0.1"
+        self._pi_ixian_address: str = ""
 
         web_cfg = cfg.get("web_ui") if isinstance(cfg.get("web_ui"), dict) else {}
         self.web_ui_enabled: bool = bool(web_cfg.get("enabled", True))
@@ -117,6 +141,35 @@ class PiCompanionHub:
             port=int(web_cfg.get("port", 8082)),
             auth_token=web_cfg.get("auth_token"),
         )
+
+    async def refresh_and_push_network_info(self) -> Dict[str, str]:
+        """Discover Pi DHCP IPv4 and QuIXI primary wallet address and push them to the ESP32-S3 Network screen."""
+        self._pi_dhcp_ip = detect_local_dhcp_ip()
+        try:
+            w_res = await self.quixi.my_wallet()
+            raw_w = w_res.get("result", w_res) if isinstance(w_res, dict) else w_res
+            if isinstance(raw_w, dict) and raw_w:
+                first_key = next(iter(raw_w.keys()))
+                if first_key and first_key not in ("result", "error"):
+                    self._pi_ixian_address = str(first_key).strip()
+            elif isinstance(raw_w, list) and raw_w:
+                self._pi_ixian_address = str(raw_w[0]).strip()
+            elif isinstance(raw_w, str) and raw_w.strip():
+                self._pi_ixian_address = raw_w.strip()
+        except Exception:
+            pass
+
+        await self.esp.set_net_info(
+            ip=self._pi_dhcp_ip,
+            ixi=self._pi_ixian_address or None,
+        )
+        net_snapshot = {
+            "ip": self._pi_dhcp_ip,
+            "ixi": self._pi_ixian_address,
+        }
+        if hasattr(self, "gui") and self.gui is not None:
+            self.gui.esp_telemetry["net"] = net_snapshot
+        return net_snapshot
 
     async def start(self) -> None:
         self.esp.set_event_handler(self._on_esp_event)
@@ -133,6 +186,7 @@ class PiCompanionHub:
 
         await self.esp.set_debug(quixi="ONLINE", voip="DIALING", bt_spk="OK")
         await self.esp.set_state("IDLE", "Connecting to AI Server...")
+        await self.refresh_and_push_network_info()
 
         # Initiate persistent spixi.voip call with the AI Server via QuIXI
         if self._is_valid_server_address():
@@ -143,6 +197,7 @@ class PiCompanionHub:
 
         try:
             while True:
+                await self.refresh_and_push_network_info()
                 # Re-attempt call setup if not currently connected
                 if not self.voip.is_in_call and self._is_valid_server_address():
                     try:
@@ -337,6 +392,9 @@ class PiCompanionHub:
                 )
         elif src == "ble" and isinstance(evt.get("ble"), list):
             self._last_ble_scan = list(evt["ble"])
+        elif src == "net":
+            if act == "refresh":
+                await self.refresh_and_push_network_info()
 
     async def _on_chat_stream(self, topic: str, payload: Dict[str, Any]) -> None:
         """Display real-time streaming text chunks from QuIXI ChatStream."""

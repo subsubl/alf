@@ -220,9 +220,19 @@ def main() -> int:
                     break
             assert trunc_res is not None and trunc_res["ok"] == 1, f"p_trunc_check failed: {trunc_res}"
 
-            print("\n6. Testing Inbound PWM Brightness Config (cfg)...")
+            print("\n6. Testing Inbound PWM Brightness Config (cfg) & Network Identity Screen (net)...")
             cres = send_and_wait_res(ser, {"t": "cfg", "bright": 45, "id": "c1"})
             assert cres["ok"] == 1 and cres.get("bright") == 45, f"cfg bright failed: {cres}"
+            nres = send_and_wait_res(
+                ser,
+                {
+                    "t": "net",
+                    "ip": "192.168.1.42",
+                    "ixi": "1TamagciPiZero2WIxianWalletAddressTest",
+                    "id": "n1",
+                },
+            )
+            assert nres["ok"] == 1, f"net info command failed: {nres}"
 
             print("\n7. Testing LVGL Synced Face, Escaped Quotes, Subtitle & Visemes...")
             send_fire_and_forget(

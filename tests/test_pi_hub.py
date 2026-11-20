@@ -1157,6 +1157,21 @@ class TestPiWebGUIQuIXIAndESP32Monitor(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(code, 200)
                     self.assertGreater(ear_res["bytes"], 100)
 
+                    # 6b. ESP32 Network screen: push RPi DHCP IP and QuIXI Ixian address & handle evt.net.refresh
+                    code, net_res = await gui.handle_api_request(
+                        "POST",
+                        "/api/esp32/net",
+                        body={"ip": "192.168.1.42", "ixi": "1PiZero2WIxianWalletAddressXYZ"},
+                    )
+                    self.assertEqual(code, 200)
+                    self.assertTrue(net_res["ok"])
+                    self.assertEqual(esp.net_ip, "192.168.1.42")
+                    self.assertEqual(esp.net_ixi, "1PiZero2WIxianWalletAddressXYZ")
+
+                    await hub._on_esp_event({"t": "evt", "src": "net", "act": "refresh"})
+                    await asyncio.sleep(0.03)
+                    self.assertEqual(esp.net_ixi, "1PiAddrTest")
+
                     # 7. Live TCP HTTP GET / and RFC 6455 WebSocket /api/ws
                     reader, writer = await asyncio.open_connection("127.0.0.1", bound_port)
                     writer.write(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")

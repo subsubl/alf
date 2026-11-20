@@ -656,6 +656,16 @@ class PiWebGUI:
                         self.esp_telemetry["vbat_mv"] = int(res["vbat_mv"])
                 return 200, {"ok": res.get("ok") == 1, "response": res}
 
+        if method == "POST" and route == "/api/esp32/net":
+            ip_arg = str(payload.get("ip") or "").strip() or None
+            ixi_arg = str(payload.get("ixi") or payload.get("address") or "").strip() or None
+            if ip_arg or ixi_arg:
+                res = await self.hub.esp.set_net_info(ip=ip_arg, ixi=ixi_arg, wait_res=bool(payload.get("wait_res", True)))
+                self.esp_telemetry["net"] = {"ip": ip_arg or "", "ixi": ixi_arg or ""}
+                return 200, {"ok": res.get("ok") == 1, "net": self.esp_telemetry["net"], "response": res}
+            net_info = await self.hub.refresh_and_push_network_info()
+            return 200, {"ok": True, "net": net_info}
+
         if method == "POST" and route == "/api/esp32/raw":
             cmd = payload.get("cmd")
             if not isinstance(cmd, dict) or "t" not in cmd:

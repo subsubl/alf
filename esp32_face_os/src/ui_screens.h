@@ -21,6 +21,7 @@ typedef struct {
     void (*on_cfg_change)(int bright, int vol, const char *mic_mode, int ble_en, int sleep_s);
     void (*on_dbg_test_call)(void);
     void (*on_dbg_ble_refresh)(void);
+    void (*on_net_refresh)(void);
 } ui_callbacks_t;
 
 /**
@@ -63,6 +64,11 @@ void ui_set_mouth(int value);
  * @brief Update QuIXI / VoIP / BT link status shown on Home & Debug screens.
  */
 void ui_set_link_status(const char *quixi, const char *voip, int rtt_ms, const char *bt_spk);
+
+/**
+ * @brief Update Raspberry Pi DHCP IP address and QuIXI Ixian wallet address on the Network screen.
+ */
+void ui_set_network_info(const char *rpi_ip, const char *ixian_addr);
 
 /**
  * @brief Update current mic active state (listening indicator).
