@@ -21,11 +21,14 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 import urllib.parse
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pi_hub.pi_system_config import (
     PiSystemConfigManager,
@@ -147,6 +150,39 @@ class FirstBootAPPortal:
     # NetworkManager AP + Wi-Fi Helpers
     # ------------------------------------------------------------------
 
+    async def _ensure_regdom_for_ap(self) -> None:
+        """Ensure cfg80211 is not stuck in world regdom '00' (which blocks AP beaconing on 2.4GHz)."""
+        try:
+            rc, out, _ = await self._run_cmd(["iw", "reg", "get"], None)
+        except FileNotFoundError:
+            return
+        if rc == 0 and re.search(r"(?m)^country\s+00\b", out or ""):
+            try:
+                await self._run_cmd(["iw", "reg", "set", "US"], None)
+            except FileNotFoundError:
+                pass
+
+    async def _wait_for_wifi_iface(self, timeout_s: float = 15.0) -> None:
+        """Wait for NetworkManager to register the Wi-Fi interface and leave unavailable/unmanaged state."""
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            rc, out, _ = await self._run_cmd(
+                ["nmcli", "-t", "-f", "DEVICE,STATE", "device", "status"], None
+            )
+            if rc != 0 or not (out or "").strip():
+                return
+            iface_state: Optional[str] = None
+            for line in out.splitlines():
+                parts = line.strip().split(":", 1)
+                if len(parts) == 2 and parts[0].strip() == self.wifi_iface:
+                    iface_state = parts[1].strip().lower()
+                    break
+            if iface_state is not None and iface_state not in ("unavailable", "unmanaged", ""):
+                return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(1.0)
+
     async def start_ap_mode(self) -> Tuple[bool, str]:
         """Bring up the temporary Wi-Fi setup hotspot via NetworkManager."""
         if self.dry_run:
@@ -154,6 +190,9 @@ class FirstBootAPPortal:
             return True, f"AP {self.ap_ssid} simulated on {self.ap_ip}"
 
         await self._run_cmd(["rfkill", "unblock", "wifi"], None)
+        await self._run_cmd(["nmcli", "radio", "wifi", "on"], None)
+        await self._ensure_regdom_for_ap()
+        await self._wait_for_wifi_iface(timeout_s=15.0)
         await self._run_cmd(["nmcli", "connection", "delete", self.ap_con_name], None)
 
         rc, out, err = await self._run_cmd(
@@ -176,10 +215,14 @@ class FirstBootAPPortal:
                 "ap",
                 "802-11-wireless.band",
                 "bg",
+                "802-11-wireless.channel",
+                "6",
                 "ipv4.method",
                 "shared",
                 "ipv4.addresses",
                 f"{self.ap_ip}/24",
+                "ipv6.method",
+                "ignore",
             ],
             None,
         )
@@ -202,6 +245,12 @@ class FirstBootAPPortal:
 
     async def scan_wifi_networks(self) -> List[Dict[str, Any]]:
         return await self.sys_cfg.scan_wifi_networks()
+
+    async def scan_bluetooth_devices(self, scan_seconds: int = 5) -> List[Dict[str, str]]:
+        return await self.sys_cfg.scan_bluetooth_devices(scan_seconds=scan_seconds)
+
+    async def connect_bluetooth_device(self, mac: str) -> Tuple[bool, str]:
+        return await self.sys_cfg.connect_bluetooth_device(mac)
 
     # ------------------------------------------------------------------
     # Validation & Provisioning Execution
@@ -389,6 +438,13 @@ class FirstBootAPPortal:
         else:
             skipped.append("server_ixian_address")
 
+        bt_mac = str(payload.get("bluetooth_mac") or "").strip().upper()
+        if bt_mac:
+            bt_ok, bt_msg = await self.connect_bluetooth_device(bt_mac)
+            applied_optional["bluetooth"] = {"mac": bt_mac, "ok": bt_ok, "detail": bt_msg}
+        else:
+            skipped.append("bluetooth_mac")
+
         # 3. Required: Wi-Fi connection (tears down AP) + optional Static IPv4
         w_ok, w_msg = await self._connect_wifi(wifi_ssid, wifi_password, wifi_country)
         if not w_ok:
@@ -452,6 +508,7 @@ class FirstBootAPPortal:
                 "ap_ip": self.ap_ip,
                 "required_fields": ["username", "password", "wifi_ssid"],
                 "skippable_fields": [
+                    "bluetooth_mac",
                     "hostname",
                     "quixi_wallet_password",
                     "server_ixian_address",
@@ -462,6 +519,14 @@ class FirstBootAPPortal:
         if method == "GET" and route == "/api/setup/wifi":
             nets = await self.scan_wifi_networks()
             return 200, {"ok": True, "networks": nets}
+
+        if method == "GET" and route == "/api/setup/bluetooth":
+            devices = await self.scan_bluetooth_devices()
+            return 200, {"ok": True, "devices": devices}
+
+        if method == "POST" and route == "/api/setup/bluetooth/connect":
+            bt_ok, bt_msg = await self.connect_bluetooth_device(str(payload.get("mac") or ""))
+            return (200 if bt_ok else 400), {"ok": bt_ok, "detail": bt_msg, "error": "" if bt_ok else bt_msg}
 
         if method == "POST" and route == "/api/setup/apply":
             ok, res = await self.apply_setup(payload)
@@ -635,7 +700,20 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
   </div>
 
   <div class="card">
-    <div class="hdr"><h2>3 · Network IPv4, raspi-config &amp; QuIXI</h2><span class="tag opt">Optional · Skippable</span></div>
+    <div class="hdr"><h2>3 · Bluetooth Speaker</h2><span class="tag opt">Optional · Skippable</span></div>
+    <div class="row">
+      <select id="btSelect" onchange="pickBt()" style="flex:1;"><option value="">-- Put speaker in pairing mode &amp; tap Scan --</option></select>
+      <button class="btn" onclick="scanBt()">Scan</button>
+    </div>
+    <div class="row">
+      <input id="btMac" type="text" placeholder="Speaker MAC (e.g. AA:BB:CC:DD:EE:FF)" style="flex:1;" />
+      <button class="btn" onclick="connectBt()">Pair &amp; Connect</button>
+    </div>
+    <div id="btStatus" style="font-size:0.78rem;color:#a8b3cf;"></div>
+  </div>
+
+  <div class="card">
+    <div class="hdr"><h2>4 · Network IPv4, raspi-config &amp; QuIXI</h2><span class="tag opt">Optional · Skippable</span></div>
     <div><label>Hostname (optional)</label><input id="hostname" type="text" placeholder="tamagci (skip to keep default)" /></div>
     <div><label>IPv4 Mode</label>
       <select id="ipv4Mode" onchange="toggleStaticIp()">
@@ -719,6 +797,37 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
     const v = document.getElementById("wifiSelect").value;
     if (v) document.getElementById("wifiSsid").value = v;
   }
+  async function scanBt() {
+    const sel = document.getElementById("btSelect");
+    const st = document.getElementById("btStatus");
+    sel.innerHTML = "<option>Scanning (~5s)...</option>";
+    st.textContent = "Scanning for Bluetooth speakers...";
+    const r = await (await fetch("/api/setup/bluetooth")).json();
+    sel.innerHTML = '<option value="">-- Select Bluetooth Speaker --</option>';
+    (r.devices || []).forEach(d => {
+      const o = document.createElement("option");
+      o.value = d.mac;
+      o.textContent = `${d.name} (${d.mac})`;
+      sel.appendChild(o);
+    });
+    st.textContent = `Found ${(r.devices || []).length} Bluetooth device(s).`;
+  }
+  function pickBt() {
+    const v = document.getElementById("btSelect").value;
+    if (v) document.getElementById("btMac").value = v;
+  }
+  async function connectBt() {
+    const mac = document.getElementById("btMac").value.trim();
+    const st = document.getElementById("btStatus");
+    st.style.color = "#a8b3cf";
+    st.textContent = "Pairing & connecting Bluetooth speaker...";
+    const res = await fetch("/api/setup/bluetooth/connect", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ mac })
+    });
+    const data = await res.json();
+    st.style.color = data.ok ? "#34d399" : "#f87171";
+    st.textContent = data.ok ? ("Connected: " + (data.detail || mac)) : ("Error: " + (data.error || "Bluetooth connect failed"));
+  }
   async function submitSetup(skipOptional) {
     const msg = document.getElementById("statusMsg");
     msg.className = "";
@@ -729,6 +838,7 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
       wifi_ssid: document.getElementById("wifiSsid").value.trim(),
       wifi_password: document.getElementById("wifiPass").value,
       wifi_country: document.getElementById("wifiCountry").value.trim(),
+      bluetooth_mac: skipOptional ? "" : document.getElementById("btMac").value.trim(),
       hostname: skipOptional ? "" : document.getElementById("hostname").value.trim(),
       ipv4_mode: skipOptional ? "auto" : document.getElementById("ipv4Mode").value,
       ipv4_address: skipOptional ? "" : document.getElementById("ipv4Addr").value.trim(),
@@ -779,12 +889,25 @@ async def run_first_boot_portal() -> None:
 
     ok, detail = await portal.start_ap_mode()
     if not ok:
-        logger.warning("Could not start NetworkManager AP: %s", detail)
+        logger.warning("Could not start NetworkManager AP on initial attempt: %s", detail)
+
+    async def _retry_ap_loop() -> None:
+        while not portal.ap_active and not portal.setup_complete_event.is_set():
+            await asyncio.sleep(5.0)
+            if portal.ap_active or portal.setup_complete_event.is_set():
+                break
+            r_ok, r_detail = await portal.start_ap_mode()
+            if not r_ok:
+                logger.warning("Retrying NetworkManager AP failed: %s", r_detail)
+
+    retry_task = asyncio.create_task(_retry_ap_loop()) if not ok else None
     await portal.start()
     try:
         await portal.setup_complete_event.wait()
         await asyncio.sleep(1.5)
     finally:
+        if retry_task is not None and not retry_task.done():
+            retry_task.cancel()
         await portal.stop()
 
 

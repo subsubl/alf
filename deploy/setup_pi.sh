@@ -40,6 +40,7 @@ ${SUDO} apt-get install -y \
     libspa-0.2-bluetooth \
     network-manager \
     dnsmasq-base \
+    iw \
     rfkill \
     curl \
     jq
@@ -47,9 +48,11 @@ ${SUDO} apt-get install -y \
 echo "[2/6] Enabling Mosquitto MQTT and Bluetooth services..."
 if [[ "${TAMAGCI_IMAGE_BUILD:-0}" == "1" ]]; then
     # Offline chroot (image build): no running systemd, so only create enable symlinks.
+    ${SUDO} systemctl enable NetworkManager
     ${SUDO} systemctl enable mosquitto
     ${SUDO} systemctl enable bluetooth
 else
+    ${SUDO} systemctl enable --now NetworkManager
     ${SUDO} systemctl enable --now mosquitto
     ${SUDO} systemctl enable --now bluetooth
 fi

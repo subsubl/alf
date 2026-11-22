@@ -1658,6 +1658,75 @@ class TestFirstBootAPSetupPortal(unittest.IsolatedAsyncioTestCase):
             finally:
                 await portal.stop()
 
+    async def test_first_boot_ap_mode_rfkill_regdom_and_iface_wait(self) -> None:
+        from pi_hub.first_boot_setup import FirstBootAPPortal
+
+        cmds: list[list[str]] = []
+        status_calls = 0
+
+        async def fake_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+            nonlocal status_calls
+            cmds.append(cmd)
+            if cmd == ["iw", "reg", "get"]:
+                return 0, "global\ncountry 00: DFS-UNSET\n", ""
+            if cmd == ["nmcli", "-t", "-f", "DEVICE,STATE", "device", "status"]:
+                status_calls += 1
+                if status_calls == 1:
+                    return 0, "wlan0:unavailable\nlo:unmanaged\n", ""
+                return 0, "wlan0:disconnected\nlo:unmanaged\n", ""
+            return 0, "", ""
+
+        portal = FirstBootAPPortal(cmd_runner=fake_runner, dry_run=False)
+        ok, detail = await portal.start_ap_mode()
+        self.assertTrue(ok, detail)
+        self.assertTrue(portal.ap_active)
+        self.assertIn(["rfkill", "unblock", "wifi"], cmds)
+        self.assertIn(["nmcli", "radio", "wifi", "on"], cmds)
+        self.assertIn(["iw", "reg", "set", "US"], cmds)
+        self.assertEqual(status_calls, 2)
+        add_cmd = next(c for c in cmds if c[:3] == ["nmcli", "connection", "add"])
+        self.assertIn("802-11-wireless.channel", add_cmd)
+        self.assertIn("6", add_cmd)
+        self.assertIn("ipv6.method", add_cmd)
+        self.assertIn("ignore", add_cmd)
+
+    async def test_first_boot_bluetooth_speaker_scan_and_connect(self) -> None:
+        from pi_hub.first_boot_setup import FirstBootAPPortal
+
+        cmds: list[list[str]] = []
+        raw_bt = (
+            "Device 11:22:33:44:55:66 11-22-33-44-55-66\n"
+            "Device AA:BB:CC:DD:EE:FF JBL Flip 6\n"
+        )
+
+        async def fake_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+            cmds.append(cmd)
+            if cmd == ["bluetoothctl", "devices"]:
+                return 0, raw_bt, ""
+            return 0, "", ""
+
+        portal = FirstBootAPPortal(cmd_runner=fake_runner, dry_run=False)
+        code, scan_res = await portal.handle_api_request("GET", "/api/setup/bluetooth")
+        self.assertEqual(code, 200)
+        self.assertEqual(scan_res["devices"][0], {"mac": "AA:BB:CC:DD:EE:FF", "name": "JBL Flip 6"})
+
+        bad_code, bad_res = await portal.handle_api_request(
+            "POST", "/api/setup/bluetooth/connect", body={"mac": "not-a-mac"}
+        )
+        self.assertEqual(bad_code, 400)
+        self.assertFalse(bad_res["ok"])
+
+        ok_code, ok_res = await portal.handle_api_request(
+            "POST", "/api/setup/bluetooth/connect", body={"mac": "aa:bb:cc:dd:ee:ff"}
+        )
+        self.assertEqual(ok_code, 200)
+        self.assertTrue(ok_res["ok"])
+        self.assertIn(["rfkill", "unblock", "bluetooth"], cmds)
+        self.assertIn(["bluetoothctl", "power", "on"], cmds)
+        self.assertIn(["bluetoothctl", "pair", "AA:BB:CC:DD:EE:FF"], cmds)
+        self.assertIn(["bluetoothctl", "trust", "AA:BB:CC:DD:EE:FF"], cmds)
+        self.assertIn(["bluetoothctl", "connect", "AA:BB:CC:DD:EE:FF"], cmds)
+
     async def test_pi_web_gui_network_and_all_raspi_config_options(self) -> None:
         """Verify PiWebGUI network (Wi-Fi scan/connect, DHCP/static IPv4) and all raspi-config options."""
         from pi_hub.pi_system_config import PiSystemConfigManager

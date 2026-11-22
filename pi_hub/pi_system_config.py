@@ -33,6 +33,7 @@ _COUNTRY_RE = re.compile(r"^[A-Za-z]{2}$")
 _CIDR_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}$")
 _IPV4_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./+-]{1,64}$")
+_BT_MAC_RE = re.compile(r"^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
 
 # raspi-config nonint interface toggles: 0 = enabled, 1 = disabled
 RASPI_INTERFACE_KEYS = (
@@ -543,3 +544,58 @@ class PiSystemConfigManager:
         if rc != 0:
             return False, (err or out or f"{act} failed").strip()
         return True, f"{act} initiated"
+
+    # ------------------------------------------------------------------
+    # Bluetooth Speaker Scan / Pair / Trust / Connect
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def parse_bluetoothctl_devices(raw_output: str) -> List[Dict[str, str]]:
+        """Parse `bluetoothctl devices` output lines (`Device <MAC> <Name>`)."""
+        by_mac: Dict[str, Dict[str, str]] = {}
+        for raw_line in (raw_output or "").splitlines():
+            line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", raw_line).strip()
+            m = re.match(r"^(?:\[[^\]]+\]\s*)?Device\s+([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*(.*)$", line)
+            if not m:
+                continue
+            mac = m.group(1).upper()
+            name = m.group(2).strip() or mac
+            by_mac[mac] = {"mac": mac, "name": name}
+        return sorted(
+            by_mac.values(),
+            key=lambda d: (d["name"].replace("-", ":") == d["mac"], d["name"].lower()),
+        )
+
+    async def scan_bluetooth_devices(self, scan_seconds: int = 5) -> List[Dict[str, str]]:
+        if self.dry_run:
+            return [
+                {"mac": "AA:BB:CC:DD:EE:FF", "name": "Alf-BT-Speaker"},
+                {"mac": "11:22:33:44:55:66", "name": "JBL Flip"},
+            ]
+        await self.run_cmd(["rfkill", "unblock", "bluetooth"], privileged=True)
+        await self.run_cmd(["bluetoothctl", "power", "on"], privileged=True)
+        secs = max(1, min(15, int(scan_seconds)))
+        await self.run_cmd(["bluetoothctl", "--timeout", str(secs), "scan", "on"], privileged=True)
+        rc, out, _ = await self.run_cmd(["bluetoothctl", "devices"], privileged=True)
+        if rc != 0:
+            return []
+        return self.parse_bluetoothctl_devices(out)
+
+    async def connect_bluetooth_device(self, mac: str) -> Tuple[bool, str]:
+        clean_mac = (mac or "").strip().upper()
+        if not _BT_MAC_RE.match(clean_mac):
+            return False, "Invalid Bluetooth MAC address (expected AA:BB:CC:DD:EE:FF)"
+        if self.dry_run:
+            return True, f"connected to Bluetooth device {clean_mac} (dry-run)"
+        await self.run_cmd(["rfkill", "unblock", "bluetooth"], privileged=True)
+        await self.run_cmd(["bluetoothctl", "power", "on"], privileged=True)
+        rc_p, out_p, err_p = await self.run_cmd(["bluetoothctl", "pair", clean_mac], privileged=True)
+        await self.run_cmd(["bluetoothctl", "trust", clean_mac], privileged=True)
+        rc_c, out_c, err_c = await self.run_cmd(["bluetoothctl", "connect", clean_mac], privileged=True)
+        if rc_c != 0:
+            detail = (err_c or out_c or err_p or out_p or "connect failed").strip()
+            if rc_p != 0 and "already exists" not in (out_p + err_p).lower():
+                return False, f"Bluetooth pair/connect failed: {detail}"
+            return False, f"Bluetooth connect failed: {detail}"
+        return True, f"connected to Bluetooth device {clean_mac}"
+
