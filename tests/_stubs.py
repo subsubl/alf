@@ -423,6 +423,24 @@ def _stub_yaml_safe_load(stream: Any) -> Any:
     return root
 
 
+def _stub_yaml_safe_dump(data: Any, sort_keys: bool = True, _indent: int = 0) -> str:
+    lines: List[str] = []
+    if isinstance(data, dict):
+        items = sorted(data.items()) if sort_keys else list(data.items())
+        for k, v in items:
+            prefix = " " * _indent
+            if isinstance(v, dict):
+                lines.append(f"{prefix}{k}:")
+                lines.append(_stub_yaml_safe_dump(v, sort_keys=sort_keys, _indent=_indent + 2).rstrip("\n"))
+            elif v is None:
+                lines.append(f"{prefix}{k}: null")
+            elif isinstance(v, bool):
+                lines.append(f"{prefix}{k}: {'true' if v else 'false'}")
+            else:
+                lines.append(f"{prefix}{k}: {v}")
+    return "\n".join(lines) + "\n"
+
+
 # ---------------------------------------------------------------------------
 # Missing-only third-party module installation
 # ---------------------------------------------------------------------------
@@ -588,6 +606,7 @@ def install_dependency_stubs() -> Dict[str, bool]:
     if not _is_available("yaml"):
         yaml_mod = types.ModuleType("yaml")
         yaml_mod.safe_load = _stub_yaml_safe_load
+        yaml_mod.safe_dump = _stub_yaml_safe_dump
         sys.modules["yaml"] = yaml_mod
         stubbed["yaml"] = True
     else:

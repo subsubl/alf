@@ -24,20 +24,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout QuIXI
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ixian-platform/QuIXI
           ref: ${{ inputs.quixi_ref || 'v0.9.4a' }}
           path: QuIXI
 
       - name: Checkout Ixian-Core
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ixian-platform/Ixian-Core
           ref: ${{ inputs.ixian_core_ref || 'master' }}
           path: Ixian-Core
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v5
         with:
           dotnet-version: "10.0.x"
 
@@ -47,7 +47,7 @@ jobs:
           dotnet publish QuIXI.csproj -c Release -r linux-arm64 --self-contained true -o "$GITHUB_WORKSPACE/quixi-linux-arm64"
           test -f "$GITHUB_WORKSPACE/quixi-linux-arm64/QuIXI"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: quixi-linux-arm64
           path: quixi-linux-arm64
@@ -59,14 +59,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: quixi-linux-arm64
           path: quixi-linux-arm64
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: esp32_face_os-firmware
           path: firmware
@@ -103,7 +103,7 @@ jobs:
           echo "name=${NAME}" >> "$GITHUB_OUTPUT"
           ls -lh "${NAME}".*
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: ${{ steps.pack.outputs.name }}
           path: |

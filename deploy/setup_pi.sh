@@ -67,7 +67,7 @@ elif command -v loginctl >/dev/null 2>&1; then
 fi
 
 if [[ -d /etc/sudoers.d ]]; then
-    printf '%s ALL=(root) NOPASSWD: /usr/bin/nmcli, /usr/bin/raspi-config, /usr/bin/hostnamectl, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff\n' "${TARGET_USER}" \
+    printf '%s ALL=(root) NOPASSWD: /usr/bin/nmcli, /usr/bin/raspi-config, /usr/bin/hostnamectl, /usr/bin/bluetoothctl, /usr/sbin/rfkill, /usr/bin/rfkill, /usr/bin/systemctl restart tamagci-pi-hub.service, /usr/bin/systemctl reboot, /usr/bin/systemctl poweroff\n' "${TARGET_USER}" \
         | ${SUDO} tee /etc/sudoers.d/tamagci-system >/dev/null
     ${SUDO} chmod 440 /etc/sudoers.d/tamagci-system
 fi

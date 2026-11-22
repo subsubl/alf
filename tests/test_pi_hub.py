@@ -1727,6 +1727,131 @@ class TestFirstBootAPSetupPortal(unittest.IsolatedAsyncioTestCase):
         self.assertIn(["bluetoothctl", "trust", "AA:BB:CC:DD:EE:FF"], cmds)
         self.assertIn(["bluetoothctl", "connect", "AA:BB:CC:DD:EE:FF"], cmds)
 
+        with tempfile.TemporaryDirectory() as tmp:
+            dnsmasq_conf = Path(tmp) / "dnsmasq-shared.d" / "tamagci-captive.conf"
+            portal_cap = FirstBootAPPortal(
+                cmd_runner=fake_runner, captive_dnsmasq_path=dnsmasq_conf, dry_run=False
+            )
+            ok_ap, _ = await portal_cap.start_ap_mode()
+            self.assertTrue(ok_ap)
+            self.assertTrue(dnsmasq_conf.is_file())
+            self.assertIn("address=/#/192.168.4.1", dnsmasq_conf.read_text(encoding="utf-8"))
+            await portal_cap.stop_ap_mode()
+            self.assertFalse(dnsmasq_conf.exists())
+
+    async def test_pi_web_gui_bluetooth_speaker_controls(self) -> None:
+        from pi_hub.pi_system_config import PiSystemConfigManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, esp, bus, port = _make_hub_with_mocks(Path(tmp))
+            gui = hub.gui
+            cmds: list[list[str]] = []
+
+            async def fake_bt_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+                cmds.append(cmd)
+                if cmd == ["bluetoothctl", "devices"]:
+                    return 0, "Device AA:BB:CC:DD:EE:FF JBL Flip 6\n", ""
+                return 0, "", ""
+
+            gui.sys_cfg = PiSystemConfigManager(cmd_runner=fake_bt_runner, dry_run=False, use_sudo=False)
+
+            code, list_res = await gui.handle_api_request("GET", "/api/system/bluetooth")
+            self.assertEqual(code, 200)
+            self.assertEqual(list_res["devices"][0]["mac"], "AA:BB:CC:DD:EE:FF")
+
+            code, scan_res = await gui.handle_api_request(
+                "POST", "/api/system/bluetooth", body={"action": "scan"}
+            )
+            self.assertEqual(code, 200)
+            self.assertTrue(any(c[:2] == ["bluetoothctl", "--timeout"] for c in cmds))
+            self.assertEqual(scan_res["devices"][0]["name"], "JBL Flip 6")
+
+            bad_code, _ = await gui.handle_api_request(
+                "POST", "/api/system/bluetooth", body={"action": "connect", "mac": "bad"}
+            )
+            self.assertEqual(bad_code, 400)
+
+            ok_code, ok_res = await gui.handle_api_request(
+                "POST", "/api/system/bluetooth", body={"action": "connect", "mac": "aa:bb:cc:dd:ee:ff"}
+            )
+            self.assertEqual(ok_code, 200)
+            self.assertTrue(ok_res["ok"])
+            self.assertIn(["bluetoothctl", "connect", "AA:BB:CC:DD:EE:FF"], cmds)
+
+            disc_code, disc_res = await gui.handle_api_request(
+                "POST", "/api/system/bluetooth", body={"action": "disconnect", "mac": "aa:bb:cc:dd:ee:ff"}
+            )
+            self.assertEqual(disc_code, 200)
+            self.assertTrue(disc_res["ok"])
+            self.assertIn(["bluetoothctl", "disconnect", "AA:BB:CC:DD:EE:FF"], cmds)
+
+            rm_code, rm_res = await gui.handle_api_request(
+                "POST", "/api/system/bluetooth", body={"action": "remove", "mac": "aa:bb:cc:dd:ee:ff"}
+            )
+            self.assertEqual(rm_code, 200)
+            self.assertTrue(rm_res["ok"])
+            self.assertIn(["bluetoothctl", "remove", "AA:BB:CC:DD:EE:FF"], cmds)
+
+            ota_code, ota_res = await gui.handle_api_request(
+                "POST", "/api/system/update", body={"restart": False}
+            )
+            self.assertEqual(ota_code, 200)
+            self.assertTrue(ota_res["ok"])
+            self.assertTrue(any(c[0] == "git" and "pull" in c for c in cmds))
+
+    async def test_first_boot_wifi_recovery_and_auth_token(self) -> None:
+        from pi_hub.first_boot_setup import FirstBootAPPortal
+        import yaml
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            sentinel = tmp_path / "firstboot.done"
+            sentinel.write_text('{"completed_at": "2026-01-01T00:00:00Z"}', encoding="utf-8")
+            hub_cfg = tmp_path / "config.yaml"
+            hub_cfg.write_text("web_ui:\n  host: 0.0.0.0\n  auth_token: null\n", encoding="utf-8")
+
+            cmds: list[list[str]] = []
+
+            async def fake_runner(cmd: list[str], stdin_txt: str | None) -> tuple[int, str, str]:
+                cmds.append(cmd)
+                if cmd[:4] == ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION"]:
+                    return 0, "wlan0:wifi:disconnected:--\n", ""
+                if cmd == ["pactl", "list", "short", "sinks"]:
+                    return 0, "42\tbluez_output.AA_BB_CC_DD_EE_FF.1\tPipeWire\tRUNNING\n", ""
+                return 0, "", ""
+
+            portal = FirstBootAPPortal(
+                sentinel_path=sentinel,
+                hub_cfg_path=hub_cfg,
+                captive_dnsmasq_path=None,
+                recovery_mode=True,
+                cmd_runner=fake_runner,
+                dry_run=False,
+            )
+            self.assertFalse(await portal.has_active_wifi_connection(wait_s=0.0))
+
+            # Recovery mode allows Wi-Fi-only reconfiguration without username/password
+            code, res = await portal.handle_api_request(
+                "POST",
+                "/api/setup/apply",
+                body={
+                    "wifi_ssid": "CafeWiFi",
+                    "wifi_password": "coffee123",
+                    "bluetooth_mac": "aa:bb:cc:dd:ee:ff",
+                    "web_ui_auth_token": "tok_secret_1234",
+                },
+            )
+            self.assertEqual(code, 200, res)
+            self.assertTrue(res["ok"])
+            self.assertTrue(res["recovery_mode"])
+            self.assertFalse(any(c[0] == "useradd" for c in cmds))
+            self.assertIn(["pactl", "set-default-sink", "bluez_output.AA_BB_CC_DD_EE_FF.1"], cmds)
+
+            saved_cfg = yaml.safe_load(hub_cfg.read_text(encoding="utf-8"))
+            self.assertEqual(saved_cfg["web_ui"]["auth_token"], "tok_secret_1234")
+            self.assertEqual(saved_cfg["bluetooth"]["speaker_mac"], "AA:BB:CC:DD:EE:FF")
+            self.assertNotIn("tok_secret_1234", sentinel.read_text(encoding="utf-8"))
+
     async def test_pi_web_gui_network_and_all_raspi_config_options(self) -> None:
         """Verify PiWebGUI network (Wi-Fi scan/connect, DHCP/static IPv4) and all raspi-config options."""
         from pi_hub.pi_system_config import PiSystemConfigManager

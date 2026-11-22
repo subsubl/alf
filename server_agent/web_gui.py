@@ -522,6 +522,29 @@ class ServerWebGUI:
             if method == "POST":
                 return 200, self.apply_settings(payload)
 
+        if method == "GET" and route == "/api/pairing":
+            addr = ""
+            quixi = getattr(self.service, "quixi", None)
+            if quixi is not None and hasattr(quixi, "my_wallet"):
+                try:
+                    w_res = await quixi.my_wallet()
+                    raw_w = w_res.get("result", w_res) if isinstance(w_res, dict) else w_res
+                    if isinstance(raw_w, dict) and raw_w:
+                        first_key = next(iter(raw_w.keys()))
+                        if first_key and first_key not in ("result", "error"):
+                            addr = str(first_key).strip()
+                    elif isinstance(raw_w, list) and raw_w:
+                        addr = str(raw_w[0]).strip()
+                    elif isinstance(raw_w, str):
+                        addr = raw_w.strip()
+                except Exception:
+                    pass
+            return 200, {
+                "ok": True,
+                "server_ixian_address": addr,
+                "pi_ixian_address": getattr(self.service, "pi_address", ""),
+            }
+
         # 5. Barge-In / Interrupt Active Speech
         if method == "POST" and route == "/api/barge_in":
             target = self.service._resolve_rpc_target() or self.service.pi_address
@@ -1195,6 +1218,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <input type="text" id="cfgMqttPort" style="width:130px" />
       </div>
       <button class="btn btn-primary" onclick="saveRuntimeSettings()">Apply Runtime Config</button>
+      <button class="btn" style="margin-top:6px;" onclick="copyServerIxianAddress()">Copy Server Ixian Address</button>
     </div>
 
     <div class="section-lbl">Open WebUI &amp; MCP Bridge</div>
@@ -1499,6 +1523,21 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       })
     });
     fetchStatus();
+  }
+
+  async function copyServerIxianAddress() {
+    const r = await api("/api/pairing");
+    const addr = (r.server_ixian_address || "").trim();
+    if (!addr) {
+      document.getElementById("toolOut").textContent = "Server QuIXI wallet address unavailable (is QuIXI running?).";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(addr);
+      document.getElementById("toolOut").textContent = `Copied Server Ixian Address:\n${addr}`;
+    } catch {
+      window.prompt("Copy Server Ixian Address:", addr);
+    }
   }
 
   async function clearHistory() {

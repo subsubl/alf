@@ -566,6 +566,17 @@ class PiSystemConfigManager:
             key=lambda d: (d["name"].replace("-", ":") == d["mac"], d["name"].lower()),
         )
 
+    async def list_bluetooth_devices(self) -> List[Dict[str, str]]:
+        if self.dry_run:
+            return [
+                {"mac": "AA:BB:CC:DD:EE:FF", "name": "Alf-BT-Speaker"},
+                {"mac": "11:22:33:44:55:66", "name": "JBL Flip"},
+            ]
+        rc, out, _ = await self.run_cmd(["bluetoothctl", "devices"], privileged=True)
+        if rc != 0:
+            return []
+        return self.parse_bluetoothctl_devices(out)
+
     async def scan_bluetooth_devices(self, scan_seconds: int = 5) -> List[Dict[str, str]]:
         if self.dry_run:
             return [
@@ -576,10 +587,7 @@ class PiSystemConfigManager:
         await self.run_cmd(["bluetoothctl", "power", "on"], privileged=True)
         secs = max(1, min(15, int(scan_seconds)))
         await self.run_cmd(["bluetoothctl", "--timeout", str(secs), "scan", "on"], privileged=True)
-        rc, out, _ = await self.run_cmd(["bluetoothctl", "devices"], privileged=True)
-        if rc != 0:
-            return []
-        return self.parse_bluetoothctl_devices(out)
+        return await self.list_bluetooth_devices()
 
     async def connect_bluetooth_device(self, mac: str) -> Tuple[bool, str]:
         clean_mac = (mac or "").strip().upper()
@@ -597,5 +605,83 @@ class PiSystemConfigManager:
             if rc_p != 0 and "already exists" not in (out_p + err_p).lower():
                 return False, f"Bluetooth pair/connect failed: {detail}"
             return False, f"Bluetooth connect failed: {detail}"
+        await self.set_default_bluetooth_audio_sink(clean_mac)
         return True, f"connected to Bluetooth device {clean_mac}"
+
+    async def set_default_bluetooth_audio_sink(self, mac: str) -> Tuple[bool, str]:
+        """Set PipeWire/PulseAudio default audio sink to the connected Bluetooth speaker when available."""
+        clean_mac = (mac or "").strip().upper()
+        if not _BT_MAC_RE.match(clean_mac):
+            return False, "Invalid Bluetooth MAC address"
+        if self.dry_run:
+            return True, f"default audio sink set for {clean_mac} (dry-run)"
+        mac_token = clean_mac.replace(":", "_")
+        try:
+            rc, out, _ = await self.run_cmd(["pactl", "list", "short", "sinks"])
+        except FileNotFoundError:
+            return False, "pactl not installed"
+        if rc != 0:
+            return False, "could not list audio sinks"
+        for line in (out or "").splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and "bluez_output" in parts[1] and mac_token in parts[1].upper():
+                sink_name = parts[1]
+                rc_s, _, err_s = await self.run_cmd(["pactl", "set-default-sink", sink_name])
+                if rc_s == 0:
+                    return True, f"default audio sink set to {sink_name}"
+                return False, (err_s or "pactl set-default-sink failed").strip()
+        return False, f"no bluez_output sink found for {clean_mac}"
+
+    async def disconnect_bluetooth_device(self, mac: str) -> Tuple[bool, str]:
+        clean_mac = (mac or "").strip().upper()
+        if not _BT_MAC_RE.match(clean_mac):
+            return False, "Invalid Bluetooth MAC address (expected AA:BB:CC:DD:EE:FF)"
+        if self.dry_run:
+            return True, f"disconnected Bluetooth device {clean_mac} (dry-run)"
+        rc, out, err = await self.run_cmd(["bluetoothctl", "disconnect", clean_mac], privileged=True)
+        if rc != 0:
+            return False, f"Bluetooth disconnect failed: {(err or out).strip()}"
+        return True, f"disconnected Bluetooth device {clean_mac}"
+
+    async def remove_bluetooth_device(self, mac: str) -> Tuple[bool, str]:
+        clean_mac = (mac or "").strip().upper()
+        if not _BT_MAC_RE.match(clean_mac):
+            return False, "Invalid Bluetooth MAC address (expected AA:BB:CC:DD:EE:FF)"
+        if self.dry_run:
+            return True, f"removed Bluetooth device {clean_mac} (dry-run)"
+        rc, out, err = await self.run_cmd(["bluetoothctl", "remove", clean_mac], privileged=True)
+        if rc != 0:
+            return False, f"Bluetooth remove failed: {(err or out).strip()}"
+        return True, f"removed Bluetooth device {clean_mac}"
+
+    # ------------------------------------------------------------------
+    # OTA / Self-Update
+    # ------------------------------------------------------------------
+
+    async def check_and_apply_ota_update(
+        self, repo_dir: str, restart: bool = False
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Pull fast-forward updates for a git-backed Alf install and optionally restart pi-hub."""
+        if self.dry_run:
+            return True, {"ok": True, "output": "Already up to date (dry-run)", "restarted": bool(restart)}
+        if not repo_dir or not os.path.isdir(os.path.join(repo_dir, ".git")):
+            return False, {
+                "ok": False,
+                "error": f"No git repository found at {repo_dir}; reflash or clone via git for OTA updates.",
+            }
+        rc, out, err = await self.run_cmd(["git", "-C", repo_dir, "pull", "--ff-only"])
+        if rc != 0:
+            return False, {"ok": False, "error": (err or out or "git pull failed").strip()}
+        restarted = False
+        if restart:
+            rc_r, _, _ = await self.run_cmd(
+                ["systemctl", "restart", "tamagci-pi-hub.service"], privileged=True
+            )
+            restarted = rc_r == 0
+        return True, {
+            "ok": True,
+            "output": (out or "Updated").strip(),
+            "restarted": restarted,
+        }
+
 

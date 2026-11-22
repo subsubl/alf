@@ -281,6 +281,26 @@ class PiWebGUI:
     # Authentication & Programmatic Request Dispatcher
     # ------------------------------------------------------------------
 
+    def _persist_hub_bt_mac(self, mac: Optional[str]) -> None:
+        cfg_path = getattr(self.hub, "config_path", None)
+        if not cfg_path:
+            return
+        try:
+            p = Path(cfg_path)
+            if not p.is_file():
+                return
+            import yaml
+
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            bt_cfg = cfg.setdefault("bluetooth", {})
+            if isinstance(bt_cfg, dict):
+                bt_cfg["speaker_mac"] = mac
+            p.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        except Exception:
+            pass
+
     def _is_request_authorized(self, headers: Dict[str, str], query_params: Dict[str, str]) -> bool:
         if not self.auth_token:
             return True
@@ -958,6 +978,43 @@ class PiWebGUI:
                 self.broadcast_event("raspi_config_updated", res)
                 return (200 if res.get("ok") else 400), res
 
+        if route == "/api/system/bluetooth":
+            if method == "GET":
+                if query.get("scan") in ("1", "true", "yes"):
+                    devices = await self.sys_cfg.scan_bluetooth_devices()
+                else:
+                    devices = await self.sys_cfg.list_bluetooth_devices()
+                return 200, {"ok": True, "devices": devices}
+            if method == "POST":
+                act = str(payload.get("action") or "scan").strip().lower()
+                if act == "scan":
+                    devices = await self.sys_cfg.scan_bluetooth_devices()
+                    return 200, {"ok": True, "devices": devices}
+                if act in ("connect", "pair"):
+                    mac = str(payload.get("mac") or "").strip().upper()
+                    ok, msg = await self.sys_cfg.connect_bluetooth_device(mac)
+                    if ok:
+                        self.hub.bt_speaker_mac = mac
+                        self._persist_hub_bt_mac(mac)
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                if act == "disconnect":
+                    ok, msg = await self.sys_cfg.disconnect_bluetooth_device(str(payload.get("mac") or ""))
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                if act in ("remove", "forget"):
+                    mac = str(payload.get("mac") or "").strip().upper()
+                    ok, msg = await self.sys_cfg.remove_bluetooth_device(mac)
+                    if ok and getattr(self.hub, "bt_speaker_mac", "") == mac:
+                        self.hub.bt_speaker_mac = ""
+                        self._persist_hub_bt_mac(None)
+                    return (200 if ok else 400), {"ok": ok, "message": msg}
+                return 400, {"ok": False, "error": f"Unknown bluetooth action: {act}"}
+
+        if method == "POST" and route == "/api/system/update":
+            repo_dir = str(Path(__file__).resolve().parent.parent)
+            restart = bool(payload.get("restart", False))
+            ok, res = await self.sys_cfg.check_and_apply_ota_update(repo_dir, restart=restart)
+            return (200 if ok else 400), res
+
         if method == "POST" and route == "/api/system/power":
             act = str(payload.get("action") or "").strip().lower()
             ok, msg = await self.sys_cfg.power_action(act)
@@ -1321,6 +1378,7 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="mono-box" id="walletBox">Loading QuIXI wallet & node status...</div>
         <div class="row">
           <button class="btn" onclick="viewWalletDetails()">View Wallet</button>
+          <button class="btn" onclick="copyPiIxianAddress()">Copy Ixian Address</button>
           <button class="btn" onclick="backupWallet()">Export Backup</button>
         </div>
       </section>
@@ -1425,7 +1483,7 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
 
       <section class="card">
         <div class="card-hdr">
-          <h2>11 · Raspberry Pi Network &amp; raspi-config</h2>
+          <h2>11 · Raspberry Pi Network, Bluetooth &amp; raspi-config</h2>
           <button class="btn" onclick="refreshPiSystem()">Refresh</button>
         </div>
         <div class="row">
@@ -1436,6 +1494,19 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
           <input type="text" id="piWifiSsid" placeholder="Wi-Fi SSID" style="flex:1;" />
           <input type="password" id="piWifiPass" placeholder="Wi-Fi Password" style="flex:1;" />
           <button class="btn btn-primary" onclick="connectPiWifi()">Connect</button>
+        </div>
+        <div class="row">
+          <select id="piBtSelect" onchange="pickPiBt()" style="flex:1;"><option value="">-- Bluetooth Speakers --</option></select>
+          <button class="btn" onclick="scanPiBt()">Scan BT</button>
+        </div>
+        <div class="row">
+          <input type="text" id="piBtMac" placeholder="Speaker MAC (AA:BB:CC:DD:EE:FF)" style="flex:1;" />
+          <button class="btn btn-primary" onclick="connectPiBt()">Pair &amp; Connect BT</button>
+        </div>
+        <div class="row">
+          <button class="btn" onclick="btAction('disconnect')">Disconnect BT</button>
+          <button class="btn" onclick="btAction('remove')">Forget BT</button>
+          <button class="btn" onclick="testPiSpeaker()">Test Speaker</button>
         </div>
         <div class="row">
           <select id="piIpv4Mode" onchange="togglePiStaticIp()">
@@ -1482,6 +1553,7 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
         </div>
         <div class="row">
           <button class="btn btn-primary" onclick="applyPiRaspiConfig()">Apply raspi-config</button>
+          <button class="btn" onclick="piOtaUpdate()">Pull Update</button>
           <button class="btn" onclick="piPower('reboot')">Reboot Pi</button>
           <button class="btn btn-danger" onclick="piPower('shutdown')">Shutdown</button>
         </div>
@@ -1578,11 +1650,26 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
   let pinVals = {};
   let blinkTick = 0;
 
+  const _urlTok = new URLSearchParams(location.search).get("token");
+  if (_urlTok) localStorage.setItem("tamagci_pi_token", _urlTok);
+
+  function getPiToken() {
+    return (localStorage.getItem("tamagci_pi_token") || "").trim();
+  }
+
   async function api(path, opts = {}) {
-    const res = await fetch(path, {
-      headers: { "Content-Type": "application/json" },
-      ...opts
-    });
+    const hdrs = { "Content-Type": "application/json", ...(opts.headers || {}) };
+    const tok = getPiToken();
+    if (tok) hdrs["Authorization"] = `Bearer ${tok}`;
+    let res = await fetch(path, { ...opts, headers: hdrs });
+    if (res.status === 401) {
+      const entered = window.prompt("Enter Pi Web GUI auth_token:");
+      if (entered && entered.trim()) {
+        localStorage.setItem("tamagci_pi_token", entered.trim());
+        hdrs["Authorization"] = `Bearer ${entered.trim()}`;
+        res = await fetch(path, { ...opts, headers: hdrs });
+      }
+    }
     return await res.json();
   }
 
@@ -1988,6 +2075,71 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
     document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
   }
 
+  async function scanPiBt() {
+    const sel = document.getElementById("piBtSelect");
+    sel.innerHTML = "<option>Scanning (~5s)...</option>";
+    const r = await api("/api/system/bluetooth", { method: "POST", body: JSON.stringify({ action: "scan" }) });
+    sel.innerHTML = '<option value="">-- Bluetooth Speakers --</option>';
+    (r.devices || []).forEach(d => {
+      const o = document.createElement("option");
+      o.value = d.mac;
+      o.textContent = `${d.name} (${d.mac})`;
+      sel.appendChild(o);
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  function pickPiBt() {
+    const v = document.getElementById("piBtSelect").value;
+    if (v) document.getElementById("piBtMac").value = v;
+  }
+
+  async function connectPiBt() {
+    const mac = document.getElementById("piBtMac").value.trim();
+    const r = await api("/api/system/bluetooth", {
+      method: "POST", body: JSON.stringify({ action: "connect", mac })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function btAction(action) {
+    const mac = document.getElementById("piBtMac").value.trim();
+    const r = await api("/api/system/bluetooth", {
+      method: "POST", body: JSON.stringify({ action, mac })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function testPiSpeaker() {
+    const r = await api("/api/esp32/audio", {
+      method: "POST", body: JSON.stringify({ earcon: "awake" })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function piOtaUpdate() {
+    const r = await api("/api/system/update", {
+      method: "POST", body: JSON.stringify({ restart: false })
+    });
+    document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
+  }
+
+  async function copyPiIxianAddress() {
+    const o = await api("/api/quixi/overview");
+    const w = o.wallet || {};
+    const addr = typeof w === "string" ? w : (Array.isArray(w) ? (w[0] || "") : (Object.keys(w)[0] || ""));
+    if (!addr) {
+      document.getElementById("walletBox").textContent = "No Ixian wallet address available yet.";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(addr);
+      document.getElementById("walletBox").textContent = `Copied Ixian address:\n${addr}`;
+    } catch {
+      window.prompt("Copy Pi Ixian Address:", addr);
+    }
+  }
+
   async function piPower(action) {
     const r = await api("/api/system/power", { method: "POST", body: JSON.stringify({ action }) });
     document.getElementById("piSystemBox").textContent = JSON.stringify(r, null, 2);
@@ -1995,7 +2147,11 @@ PI_DASHBOARD_HTML = """<!DOCTYPE html>
 
   function connectWS() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
+    const tok = getPiToken();
+    const wsUrl = tok
+      ? `${proto}//${location.host}/api/ws?token=${encodeURIComponent(tok)}`
+      : `${proto}//${location.host}/api/ws`;
+    const ws = new WebSocket(wsUrl);
     const dot = document.getElementById("wsDot");
     ws.onopen = () => { dot.style.background = "#34d399"; };
     ws.onclose = () => { dot.style.background = "#f87171"; setTimeout(connectWS, 2500); };

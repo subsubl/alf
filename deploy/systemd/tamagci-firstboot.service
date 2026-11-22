@@ -1,6 +1,5 @@
 [Unit]
-Description=Tamagci Pi Zero 2 W First-Boot AP Setup Portal
-ConditionPathExists=!/etc/tamagci/firstboot.done
+Description=Tamagci Pi Zero 2 W First-Boot & Wi-Fi Recovery AP Setup Portal
 After=NetworkManager.service wpa_supplicant.service systemd-rfkill.service bluetooth.service
 Wants=NetworkManager.service bluetooth.service
 Before=quixi-pi.service tamagci-pi-hub.service

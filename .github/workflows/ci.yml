@@ -23,9 +23,9 @@ jobs:
       matrix:
         python: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
           cache: pip
@@ -55,7 +55,7 @@ jobs:
     name: ShellCheck (deploy scripts)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: ShellCheck
         run: shellcheck --severity=warning deploy/*.sh deploy/image/*.sh esp32_face_os/*.sh
 
@@ -65,11 +65,11 @@ jobs:
     env:
       ZEPHYR_SDK_VERSION: "0.16.8"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           path: alf
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
@@ -92,7 +92,7 @@ jobs:
 
       - name: Cache Zephyr SDK
         id: sdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~/zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}
           key: zephyr-sdk-${{ env.ZEPHYR_SDK_VERSION }}-xtensa-s3
@@ -119,7 +119,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/out"
           cp "$HOME/zephyrproject/build/zephyr/zephyr.bin" "$HOME/zephyrproject/build/zephyr/zephyr.elf" "$GITHUB_WORKSPACE/out/"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: esp32_face_os-firmware
           path: out/*

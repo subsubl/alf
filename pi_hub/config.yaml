@@ -38,9 +38,12 @@ audio:
 
 web_ui:
   enabled: true               # Built-in Raspberry Pi Hub Web GUI (QuIXI wallet/contacts + ESP32-S3 monitor)
-  host: 127.0.0.1             # Bind address (use 0.0.0.0 with auth_token for LAN access)
+  host: 0.0.0.0               # Bind address (LAN-accessible at http://tamagci.local:8082; set auth_token below to require bearer auth)
   port: 8082                  # HTTP + WebSocket port
   auth_token: null            # Optional bearer token required for /api/* when non-empty
+
+bluetooth:
+  speaker_mac: null           # Optional Bluetooth speaker MAC (AA:BB:CC:DD:EE:FF) auto-reconnected on boot
 
 performance:
   housekeeping_interval_s: 30.0     # Pi Zero 2 W: network/wallet/redial housekeeping cadence (fast 10s redial while AI Server call is down)

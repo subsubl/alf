@@ -45,6 +45,7 @@ DEFAULT_AP_IP = "192.168.4.1"
 DEFAULT_SENTINEL_PATH = Path("/etc/tamagci/firstboot.done")
 DEFAULT_IXIAN_CFG_PATH = Path("/opt/quixi/ixian.cfg")
 DEFAULT_HUB_CFG_PATH = Path("/opt/tamagci/pi_hub/config.yaml")
+DEFAULT_CAPTIVE_DNSMASQ_PATH = Path("/etc/NetworkManager/dnsmasq-shared.d/tamagci-captive.conf")
 
 _USERNAME_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _HOSTNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$")
@@ -116,6 +117,9 @@ class FirstBootAPPortal:
         sentinel_path: Path = DEFAULT_SENTINEL_PATH,
         ixian_cfg_path: Path = DEFAULT_IXIAN_CFG_PATH,
         hub_cfg_path: Path = DEFAULT_HUB_CFG_PATH,
+        captive_dnsmasq_path: Optional[Path] = DEFAULT_CAPTIVE_DNSMASQ_PATH,
+        esp_serial_port: str = "/dev/ttyACM0",
+        recovery_mode: bool = False,
         cmd_runner: Optional[CmdRunnerFn] = None,
         dry_run: bool = False,
     ) -> None:
@@ -128,6 +132,11 @@ class FirstBootAPPortal:
         self.sentinel_path = Path(sentinel_path)
         self.ixian_cfg_path = Path(ixian_cfg_path)
         self.hub_cfg_path = Path(hub_cfg_path)
+        self.captive_dnsmasq_path: Optional[Path] = (
+            Path(captive_dnsmasq_path) if captive_dnsmasq_path is not None else None
+        )
+        self.esp_serial_port = esp_serial_port
+        self.recovery_mode = bool(recovery_mode)
         self._run_cmd: CmdRunnerFn = cmd_runner or _default_cmd_runner
         self.dry_run = bool(dry_run)
         self.sys_cfg = PiSystemConfigManager(
@@ -145,6 +154,50 @@ class FirstBootAPPortal:
 
     def is_first_boot_needed(self) -> bool:
         return not self.sentinel_path.is_file()
+
+    async def has_active_wifi_connection(self, wait_s: float = 0.0) -> bool:
+        """Return True if wifi_iface is connected to a non-AP Wi-Fi network (optionally waiting up to wait_s)."""
+        if self.dry_run:
+            return False
+        deadline = time.monotonic() + max(0.0, wait_s)
+        while True:
+            rc, out, _ = await self._run_cmd(
+                ["nmcli", "-t", "-f", "DEVICE,TYPE,STATE,CONNECTION", "device", "status"], None
+            )
+            if rc == 0 and out:
+                for line in out.splitlines():
+                    parts = re.split(r"(?<!\\):", line.strip())
+                    if len(parts) >= 4 and parts[0].strip() == self.wifi_iface:
+                        state = parts[2].strip().lower()
+                        con = parts[3].replace("\\:", ":").strip()
+                        if state == "connected" and con and con != "--" and con != self.ap_con_name:
+                            return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(2.0)
+
+    def _notify_esp32_ap_ready(self) -> bool:
+        """Best-effort one-shot NDJSON subtitle to ESP32-S3 LCD so the face shows AP setup instructions."""
+        if self.dry_run or not self.esp_serial_port or not os.path.exists(self.esp_serial_port):
+            return False
+        try:
+            import serial  # type: ignore
+
+            msg = json.dumps(
+                {
+                    "t": "cmd",
+                    "c": "state",
+                    "emo": "ALERT",
+                    "sub": f"Wi-Fi: {self.ap_ssid} -> {self.ap_ip}",
+                }
+            ) + "\n"
+            with serial.Serial(self.esp_serial_port, 921600, timeout=0.5, write_timeout=1.0) as ser:
+                ser.write(msg.encode("utf-8"))
+                ser.flush()
+            return True
+        except Exception as exc:
+            logger.debug("Could not push AP status to ESP32 (%s): %s", self.esp_serial_port, exc)
+            return False
 
     # ------------------------------------------------------------------
     # NetworkManager AP + Wi-Fi Helpers
@@ -193,6 +246,12 @@ class FirstBootAPPortal:
         await self._run_cmd(["nmcli", "radio", "wifi", "on"], None)
         await self._ensure_regdom_for_ap()
         await self._wait_for_wifi_iface(timeout_s=15.0)
+        if self.captive_dnsmasq_path is not None:
+            try:
+                self.captive_dnsmasq_path.parent.mkdir(parents=True, exist_ok=True)
+                self.captive_dnsmasq_path.write_text(f"address=/#/{self.ap_ip}\n", encoding="utf-8")
+            except OSError as exc:
+                logger.debug("Could not write captive dnsmasq rule %s: %s", self.captive_dnsmasq_path, exc)
         await self._run_cmd(["nmcli", "connection", "delete", self.ap_con_name], None)
 
         rc, out, err = await self._run_cmd(
@@ -234,6 +293,7 @@ class FirstBootAPPortal:
             return False, (err2 or out2 or "nmcli up ap failed").strip()
 
         self.ap_active = True
+        self._notify_esp32_ap_ready()
         logger.info("First-boot AP '%s' active at http://%s", self.ap_ssid, self.ap_ip)
         return True, f"AP {self.ap_ssid} active at {self.ap_ip}"
 
@@ -241,6 +301,11 @@ class FirstBootAPPortal:
         if not self.dry_run:
             await self._run_cmd(["nmcli", "connection", "down", self.ap_con_name], None)
             await self._run_cmd(["nmcli", "connection", "delete", self.ap_con_name], None)
+            if self.captive_dnsmasq_path is not None:
+                try:
+                    self.captive_dnsmasq_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
         self.ap_active = False
 
     async def scan_wifi_networks(self) -> List[Dict[str, Any]]:
@@ -257,20 +322,23 @@ class FirstBootAPPortal:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def validate_setup_payload(payload: Dict[str, Any]) -> Tuple[bool, str]:
-        """Validate required fields (username, password, wifi_ssid). All other fields are optional/skippable."""
+    def validate_setup_payload(
+        payload: Dict[str, Any], recovery_mode: bool = False
+    ) -> Tuple[bool, str]:
+        """Validate required fields (username, password, wifi_ssid). In recovery_mode only wifi_ssid is required."""
         username = str(payload.get("username") or "").strip()
         password = str(payload.get("password") or "")
         wifi_ssid = str(payload.get("wifi_ssid") or "").strip()
 
-        if not username:
-            return False, "Missing required 'username'"
-        if not _USERNAME_RE.match(username) or username == "root":
-            return False, (
-                "Invalid 'username': use 1-32 lowercase letters, digits, '_' or '-' (cannot be 'root')"
-            )
-        if not password or len(password) < 4:
-            return False, "Missing or too short 'password' (minimum 4 characters)"
+        if not recovery_mode or username or password:
+            if not username:
+                return False, "Missing required 'username'"
+            if not _USERNAME_RE.match(username) or username == "root":
+                return False, (
+                    "Invalid 'username': use 1-32 lowercase letters, digits, '_' or '-' (cannot be 'root')"
+                )
+            if not password or len(password) < 4:
+                return False, "Missing or too short 'password' (minimum 4 characters)"
         if not wifi_ssid:
             return False, "Missing required 'wifi_ssid'"
 
@@ -354,27 +422,29 @@ class FirstBootAPPortal:
             pass
         return True
 
-    def _apply_optional_server_address(self, server_addr: str) -> bool:
-        addr = (server_addr or "").strip()
-        if not addr or not self.hub_cfg_path.is_file():
+    def _apply_optional_hub_setting(self, section: str, key: str, value: Any) -> bool:
+        if value in (None, "") or not self.hub_cfg_path.is_file():
             return False
         cfg = yaml.safe_load(self.hub_cfg_path.read_text(encoding="utf-8")) or {}
         if not isinstance(cfg, dict):
             cfg = {}
-        q_cfg = cfg.setdefault("quixi", {})
-        if isinstance(q_cfg, dict):
-            q_cfg["server_ixian_address"] = addr
+        sec_cfg = cfg.setdefault(section, {})
+        if isinstance(sec_cfg, dict):
+            sec_cfg[key] = value
         self.hub_cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
         return True
 
+    def _apply_optional_server_address(self, server_addr: str) -> bool:
+        return self._apply_optional_hub_setting("quixi", "server_ixian_address", (server_addr or "").strip())
+
     async def apply_setup(self, payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-        """Execute required (user + wifi) and optional (skippable) first-boot setup steps."""
-        ok, err = self.validate_setup_payload(payload)
+        """Execute required (user + wifi, or wifi-only in recovery_mode) and optional first-boot setup steps."""
+        ok, err = self.validate_setup_payload(payload, recovery_mode=self.recovery_mode)
         if not ok:
             return False, {"ok": False, "error": err}
 
-        username = str(payload["username"]).strip()
-        password = str(payload["password"])
+        username = str(payload.get("username") or "").strip()
+        password = str(payload.get("password") or "")
         wifi_ssid = str(payload["wifi_ssid"]).strip()
         wifi_password = str(payload.get("wifi_password") or "")
         wifi_country = str(payload.get("wifi_country") or "").strip().upper()
@@ -382,14 +452,17 @@ class FirstBootAPPortal:
         hostname = str(payload.get("hostname") or "").strip()
         wallet_pw = str(payload.get("quixi_wallet_password") or "").strip()
         server_addr = str(payload.get("server_ixian_address") or "").strip()
-        enable_ssh = bool(payload.get("enable_ssh", True))
+        web_ui_token = str(payload.get("web_ui_auth_token") or "").strip()
 
-        # 1. Required: Linux user
-        u_ok, u_msg = await self._provision_linux_user(username, password)
-        if not u_ok:
-            return False, {"ok": False, "error": u_msg}
+        # 1. Required (or optional in recovery_mode): Linux user
+        if username and password:
+            u_ok, u_msg = await self._provision_linux_user(username, password)
+            if not u_ok:
+                return False, {"ok": False, "error": u_msg}
+        else:
+            u_msg = "kept existing user (Wi-Fi recovery mode)"
 
-        # 2. Optional (skippable): hostname, SSH, raspi-config options, QuIXI walletPassword, server_ixian_address
+        # 2. Optional (skippable): hostname, SSH, raspi-config options, QuIXI walletPassword, server_ixian_address, web_ui_auth_token, bluetooth_mac
         skipped: List[str] = []
         applied_optional: Dict[str, Any] = {}
 
@@ -438,9 +511,17 @@ class FirstBootAPPortal:
         else:
             skipped.append("server_ixian_address")
 
+        if web_ui_token:
+            self._apply_optional_hub_setting("web_ui", "auth_token", web_ui_token)
+            applied_optional["web_ui_auth_token_set"] = True
+        else:
+            skipped.append("web_ui_auth_token")
+
         bt_mac = str(payload.get("bluetooth_mac") or "").strip().upper()
         if bt_mac:
             bt_ok, bt_msg = await self.connect_bluetooth_device(bt_mac)
+            if bt_ok:
+                self._apply_optional_hub_setting("bluetooth", "speaker_mac", bt_mac)
             applied_optional["bluetooth"] = {"mac": bt_mac, "ok": bt_ok, "detail": bt_msg}
         else:
             skipped.append("bluetooth_mac")
@@ -465,20 +546,22 @@ class FirstBootAPPortal:
         else:
             skipped.append("static_ipv4")
 
-        # 4. Write sentinel (no plaintext passwords!)
+        # 4. Write sentinel (no plaintext passwords or tokens!)
         self.sentinel_path.parent.mkdir(parents=True, exist_ok=True)
         sentinel_data = {
             "completed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "username": username,
+            "username": username or "(existing)",
             "wifi_ssid": wifi_ssid,
+            "recovery_mode": self.recovery_mode,
             "skipped_optional": skipped,
         }
         self.sentinel_path.write_text(json.dumps(sentinel_data, indent=2), encoding="utf-8")
 
         summary = {
             "ok": True,
-            "username": username,
+            "username": username or "(existing)",
             "wifi_ssid": wifi_ssid,
+            "recovery_mode": self.recovery_mode,
             "user_status": u_msg,
             "wifi_status": w_msg,
             "applied_optional": applied_optional,
@@ -503,12 +586,14 @@ class FirstBootAPPortal:
             return 200, {
                 "ok": True,
                 "first_boot_needed": self.is_first_boot_needed(),
+                "recovery_mode": self.recovery_mode,
                 "ap_active": self.ap_active,
                 "ap_ssid": self.ap_ssid,
                 "ap_ip": self.ap_ip,
-                "required_fields": ["username", "password", "wifi_ssid"],
+                "required_fields": ["wifi_ssid"] if self.recovery_mode else ["username", "password", "wifi_ssid"],
                 "skippable_fields": [
                     "bluetooth_mac",
+                    "web_ui_auth_token",
                     "hostname",
                     "quixi_wallet_password",
                     "server_ixian_address",
@@ -768,6 +853,12 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
         </div>
       </div>
     </details>
+    <div><label>Pi Web GUI Auth Token (optional, for LAN protection on :8082)</label>
+      <div class="row">
+        <input id="webUiToken" type="text" placeholder="Leave blank for open LAN access" style="flex:1;" />
+        <button class="btn" onclick="genToken()">Generate</button>
+      </div>
+    </div>
     <div><label>QuIXI Wallet Password (optional)</label><input id="walletPw" type="password" placeholder="Skip to set later at :8082" /></div>
     <div><label>AI Server Ixian Address (optional)</label><input id="serverAddr" type="text" placeholder="Skip to pair later at :8082" /></div>
   </div>
@@ -777,6 +868,11 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
   <div id="statusMsg"></div>
 
 <script>
+  function genToken() {
+    const arr = new Uint8Array(16);
+    crypto.getRandomValues(arr);
+    document.getElementById("webUiToken").value = Array.from(arr, b => b.toString(16).padStart(2, "0")).join("");
+  }
   function toggleStaticIp() {
     document.getElementById("staticIpFields").style.display =
       document.getElementById("ipv4Mode").value === "manual" ? "flex" : "none";
@@ -839,6 +935,7 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
       wifi_password: document.getElementById("wifiPass").value,
       wifi_country: document.getElementById("wifiCountry").value.trim(),
       bluetooth_mac: skipOptional ? "" : document.getElementById("btMac").value.trim(),
+      web_ui_auth_token: skipOptional ? "" : document.getElementById("webUiToken").value.trim(),
       hostname: skipOptional ? "" : document.getElementById("hostname").value.trim(),
       ipv4_mode: skipOptional ? "auto" : document.getElementById("ipv4Mode").value,
       ipv4_address: skipOptional ? "" : document.getElementById("ipv4Addr").value.trim(),
@@ -872,7 +969,8 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
       msg.textContent = "Error: " + (data.error || "Setup failed");
       return;
     }
-    msg.textContent = `Setup complete! Connecting to '${data.wifi_ssid}' for user '${data.username}'. You can reconnect to your normal Wi-Fi and open http://${body.hostname || "tamagci"}.local:8082`;
+    const tokSuffix = body.web_ui_auth_token ? `/?token=${encodeURIComponent(body.web_ui_auth_token)}` : "";
+    msg.textContent = `Setup complete! Connecting to '${data.wifi_ssid}' for user '${data.username}'. You can reconnect to your normal Wi-Fi and open http://${body.hostname || "tamagci"}.local:8082${tokSuffix}`;
   }
   window.addEventListener("DOMContentLoaded", scanWifi);
 </script>
@@ -884,8 +982,11 @@ FIRST_BOOT_HTML = """<!DOCTYPE html>
 async def run_first_boot_portal() -> None:
     portal = FirstBootAPPortal()
     if not portal.is_first_boot_needed():
-        logger.info("First-boot sentinel %s exists; skipping AP setup.", portal.sentinel_path)
-        return
+        if await portal.has_active_wifi_connection(wait_s=45.0):
+            logger.info("First-boot sentinel %s exists and Wi-Fi is connected; skipping AP setup.", portal.sentinel_path)
+            return
+        logger.warning("First-boot sentinel exists but no active Wi-Fi after 45s; entering Wi-Fi recovery AP mode.")
+        portal.recovery_mode = True
 
     ok, detail = await portal.start_ap_mode()
     if not ok:

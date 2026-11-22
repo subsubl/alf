@@ -174,6 +174,8 @@ class PiCompanionHub:
 
         web_cfg = cfg.get("web_ui") if isinstance(cfg.get("web_ui"), dict) else {}
         self.web_ui_enabled: bool = bool(web_cfg.get("enabled", True))
+        bt_cfg = cfg.get("bluetooth") if isinstance(cfg.get("bluetooth"), dict) else {}
+        self.bt_speaker_mac: str = str(bt_cfg.get("speaker_mac") or "").strip().upper()
         self.gui = PiWebGUI(
             self,
             host=str(web_cfg.get("host", "127.0.0.1") or "127.0.0.1"),
@@ -227,6 +229,17 @@ class PiCompanionHub:
 
         await self.esp.start()
         await self.quixi.start()
+        if self.bt_speaker_mac:
+            try:
+                bt_ok, bt_msg = await self.gui.sys_cfg.connect_bluetooth_device(self.bt_speaker_mac)
+                logger.info(
+                    "Auto-reconnect Bluetooth speaker %s: %s (%s)",
+                    self.bt_speaker_mac,
+                    bt_ok,
+                    bt_msg,
+                )
+            except Exception as exc:
+                logger.warning("Auto-reconnect Bluetooth speaker %s failed: %s", self.bt_speaker_mac, exc)
         await self.audio.start()
         if self.web_ui_enabled:
             await self.gui.start()
